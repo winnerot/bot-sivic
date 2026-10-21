@@ -528,12 +528,15 @@ def generar_documento_pdf(
 async def get_or_create_page():
     global _browser_inst, _page_inst
     
-    if not _browser_inst or not _browser_inst.is_connected():
-        # playwright-termux detecta automáticamente el navegador instalado en Termux
+    try:
+        if not _browser_inst:
+            _browser_inst = Chromium(headless=True)
+        
+        if _page_inst and not _page_inst.is_closed():
+            return _page_inst
+    except Exception as e:
+        logger.error(f"Error conectando con Chromium via playwright-termux: {e}")
         _browser_inst = Chromium(headless=True)
-    
-    if _page_inst and not _page_inst.is_closed():
-        return _page_inst
 
     _page_inst = _browser_inst.new_page()
     return _page_inst

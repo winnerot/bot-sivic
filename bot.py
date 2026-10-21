@@ -530,7 +530,10 @@ def generar_documento_pdf(
 async def get_or_create_page():
     global _playwright_inst, _browser_inst, _page_inst
     if not _playwright_inst:
-        _playwright_inst = await async_playwright_termux().start()
+        # Usamos __aenter__() para inicializarlo de forma manual y persistente en la variable global,
+        # o reestructuramos para usar 'async with' si abres/cierras por sesión.
+        _playwright_inst = await async_playwright_termux().__aenter__()
+        
     if not _browser_inst or not _browser_inst.is_connected():
         _browser_inst = await _playwright_inst.chromium.launch(headless=True)
     

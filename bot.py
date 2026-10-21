@@ -16,7 +16,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-from termux_playwright import async_playwright_termux as async_playwright
+from playwright.async_api import async_playwright
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
 import urllib3
@@ -151,7 +151,6 @@ def consultar_telefono_mysql(cedula: str) -> list:
     """Consulta los números telefónicos mediante la API PHP alojada en serv00 vía HTTP y con mayor tiempo de espera."""
     telefonos = []
     try:
-        # Cambiamos a http:// y aumentamos el timeout a 10 segundos por seguridad
         url = f"http://victor159.serv00.net/consulta.php?cedula={cedula}"
         response = requests.get(url, timeout=20, verify=False)
         
@@ -342,7 +341,6 @@ def generar_documento_pdf(
     story.append(crear_encabezado_seccion("1. DATOS DE IDENTIFICACIÓN DE LA PERSONA / EMPRESA"))
     story.append(Spacer(1, 4))
 
-    # Formatear teléfonos para los datos básicos si existen
     telefonos_str = ", ".join(telefonos) if telefonos else "NO INDICA"
 
     datos_tabla = [
@@ -525,17 +523,20 @@ def generar_documento_pdf(
 
 
 # ==============================================================================
-# PLAYWRIGHT CORE FUNCTIONS
+# PLAYWRIGHT CORE FUNCTIONS (CONFIGURADO PARA ANDROID / TERMUX)
 # ==============================================================================
 async def get_or_create_page():
     global _playwright_inst, _browser_inst, _page_inst
     if not _playwright_inst:
-        # Usamos __aenter__() para inicializarlo de forma manual y persistente en la variable global,
-        # o reestructuramos para usar 'async with' si abres/cierras por sesión.
-        _playwright_inst = await async_playwright_termux().__aenter__()
+        _playwright_inst = await async_playwright().__aenter__()
         
     if not _browser_inst or not _browser_inst.is_connected():
-        _browser_inst = await _playwright_inst.chromium.launch(headless=True)
+        # Apuntamos al Chromium nativo de Termux para evitar errores de arquitectura ARM
+        _browser_inst = await _playwright_inst.chromium.launch(
+            executable_path='/data/data/com.termux/files/usr/bin/chromium',
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"]
+        )
     
     if _page_inst and not _page_inst.is_closed():
         return _page_inst
@@ -994,7 +995,6 @@ async def ejecutar_consulta_rif(page, target_val: str, tipo_consulta: str, updat
         mensaje_final += f"⏳ *Edad:* {edad_calculada}\n"
         mensaje_final += f"🪪 *Cédula de Identidad:* `{cedula_rif_str}`\n"
         
-        # 📱 SECCIÓN DE TELÉFONOS ENCONTRADOS EN MYSQL
         mensaje_final += f"📞 *Teléfono(s) Asociado(s):*\n"
         if telefonos_registrados:
             for tlf in telefonos_registrados:
@@ -1113,7 +1113,6 @@ async def manejar_cedula_o_texto(update: Update, context: ContextTypes.DEFAULT_T
     raw_text = update.message.text.strip()
     texto_limpio = re.sub(r"[^A-Z0-9]", "", raw_text.upper())
 
-    # Detectar si es un número de teléfono (por ejemplo, empieza con 04 o tiene 10-11 dígitos numéricos limpios)
     es_telefono = False
     digitos_puros = re.sub(r"\D", "", raw_text)
     
@@ -1121,7 +1120,6 @@ async def manejar_cedula_o_texto(update: Update, context: ContextTypes.DEFAULT_T
         es_telefono = True
 
     if es_telefono:
-        # ---- PROCESO DE BÚSQUEDA INVERSA POR TELÉFONO ----
         await update.message.reply_text(f"🔍 Ejecutando búsqueda para el teléfono `{digitos_puros}`...", parse_mode="Markdown")
         
         resultados_inv = await asyncio.to_thread(consultar_inversa_mysql, digitos_puros)
@@ -1144,7 +1142,6 @@ async def manejar_cedula_o_texto(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text(mensaje_res, parse_mode="Markdown")
         return ConversationHandler.END
 
-    # ---- LÓGICA HABITUAL DE CÉDULA O RIF ----
     tipo_consulta = "CEDULA"
     parametro_busqueda = ""
 
@@ -1269,7 +1266,7 @@ async def recibir_captcha_y_consultar(update: Update, context: ContextTypes.DEFA
                     pass
                 if os.path.exists(SESSION_FILE):
                     os.remove(SESSION_FILE)
-                await update.message.reply_text(f"❌ El SENIAT rechazó el acceso: _{error_text.strip()}_. Envía la consulta de nuevo.", parse_mode="Markdown")
+                await update.message.reply_text(f"❌ El SENIAT rechazó el acceso: _{error_text.strip()}_. Envía la consulta de novo.", parse_mode="Markdown")
                 context.user_data.clear()
                 return ConversationHandler.END
 

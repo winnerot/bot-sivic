@@ -4,11 +4,17 @@ import types
 # ==============================================================================
 # PARCHE DE COMPATIBILIDAD PLAYWRIGHT PARA TERMUX / ANDROID
 # ==============================================================================
-# Este bloque simula el módulo 'playwright' en memoria para evitar el ModuleNotFoundError
 if "playwright" not in sys.modules:
     mock_playwright = types.ModuleType("playwright")
     mock_async_api = types.ModuleType("playwright.async_api")
+    
+    # Definimos una función simulada para que async_playwright no falle al importarse
+    async def async_playwright_dummy():
+        raise RuntimeError("Usando termux_playwright en Android")
+    
+    mock_async_api.async_playwright = async_playwright_dummy
     mock_playwright.async_api = mock_async_api
+    
     sys.modules["playwright"] = mock_playwright
     sys.modules["playwright.async_api"] = mock_async_api
 

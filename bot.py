@@ -529,28 +529,13 @@ async def get_or_create_page():
     global _browser_inst, _page_inst
     
     if not _browser_inst or not _browser_inst.is_connected():
-        # Inicializamos usando el navegador Chromium nativo de Termux
-        _browser_inst = Chromium(
-            headless=True,
-            executable_path='/data/data/com.termux/files/usr/bin/chromium'
-        )
+        # playwright-termux detecta automáticamente el navegador instalado en Termux
+        _browser_inst = Chromium(headless=True)
     
     if _page_inst and not _page_inst.is_closed():
         return _page_inst
 
     _page_inst = _browser_inst.new_page()
-    return _page_inst
-
-    context_kwargs = {"viewport": {"width": 1280, "height": 800}}
-    if os.path.exists(SESSION_FILE) and os.path.getsize(SESSION_FILE) > 50:
-        try:
-            context = await _browser_inst.new_context(storage_state=SESSION_FILE, **context_kwargs)
-        except Exception:
-            context = await _browser_inst.new_context(**context_kwargs)
-    else:
-        context = await _browser_inst.new_context(**context_kwargs)
-        
-    _page_inst = await context.new_page()
     return _page_inst
 
 

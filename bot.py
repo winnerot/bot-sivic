@@ -81,7 +81,6 @@ def get_or_create_driver():
     global _driver_inst
     if _driver_inst is not None:
         try:
-            # Verifica si la instancia sigue viva realizando un chequeo de URL
             _ = _driver_inst.current_url
             return _driver_inst
         except Exception:
@@ -99,10 +98,10 @@ def get_or_create_driver():
     chrome_options.add_argument("--window-size=1280,800")
     chrome_options.binary_location = "/data/data/com.termux/files/usr/bin/chromium"
 
-    service = Service("/data/data/com.termux/files/usr/bin/chromedriver")
+    # webdriver-manager se encarga de proveer el ejecutable de forma automática
+    service = Service(ChromeDriverManager().install())
     _driver_inst = webdriver.Chrome(service=service, options=chrome_options)
     return _driver_inst
-
 
 # ==============================================================================
 # GESTIÓN DE ACCESO, LOGS Y NOTIFICACIONES

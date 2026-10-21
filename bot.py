@@ -16,7 +16,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-from termux_playwright import async_playwright_termux as async_playwright
+from termux_playwright import async_playwright_termux
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
 import urllib3
@@ -528,7 +528,8 @@ def generar_documento_pdf(
 async def get_or_create_page():
     global _playwright_inst, _browser_inst, _page_inst
     if not _playwright_inst:
-        _playwright_inst = await async_playwright().__aenter__()
+        # Usamos directamente async_playwright_termux aquí
+        _playwright_inst = await async_playwright_termux().__aenter__()
         
     if not _browser_inst or not _browser_inst.is_connected():
         _browser_inst = await _playwright_inst.chromium.launch(

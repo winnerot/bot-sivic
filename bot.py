@@ -531,7 +531,6 @@ async def get_or_create_page():
         _playwright_inst = await async_playwright().__aenter__()
         
     if not _browser_inst or not _browser_inst.is_connected():
-        # Apuntamos al Chromium nativo de Termux para evitar errores de arquitectura ARM
         _browser_inst = await _playwright_inst.chromium.launch(
             executable_path='/data/data/com.termux/files/usr/bin/chromium',
             headless=True,

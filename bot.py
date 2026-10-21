@@ -16,7 +16,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-from playwright_termux.async_api import async_playwright_termux
+from termux_playwright import async_playwright_termux
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
 import urllib3

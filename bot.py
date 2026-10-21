@@ -1,3 +1,17 @@
+import sys
+import types
+
+# ==============================================================================
+# PARCHE DE COMPATIBILIDAD PLAYWRIGHT PARA TERMUX / ANDROID
+# ==============================================================================
+# Este bloque simula el módulo 'playwright' en memoria para evitar el ModuleNotFoundError
+if "playwright" not in sys.modules:
+    mock_playwright = types.ModuleType("playwright")
+    mock_async_api = types.ModuleType("playwright.async_api")
+    mock_playwright.async_api = mock_async_api
+    sys.modules["playwright"] = mock_playwright
+    sys.modules["playwright.async_api"] = mock_async_api
+
 import asyncio
 import io
 import logging
@@ -528,7 +542,6 @@ def generar_documento_pdf(
 async def get_or_create_page():
     global _playwright_inst, _browser_inst, _page_inst
     if not _playwright_inst:
-        # Usamos directamente async_playwright_termux aquí
         _playwright_inst = await async_playwright_termux().__aenter__()
         
     if not _browser_inst or not _browser_inst.is_connected():

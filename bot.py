@@ -16,7 +16,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-from termux_playwright import async_playwright_termux
+from playwright_termux import Chromium
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
 import urllib3
@@ -526,30 +526,20 @@ def generar_documento_pdf(
 # PLAYWRIGHT CORE FUNCTIONS (CONFIGURADO PARA ANDROID / TERMUX)
 # ==============================================================================
 async def get_or_create_page():
-    global _playwright_inst, _browser_inst, _page_inst
-    if not _playwright_inst:
-        # Inicializamos el objeto de playwright directamente
-        _playwright_inst = await async_playwright_termux().__aenter__()
-        
+    global _browser_inst, _page_inst
+    
     if not _browser_inst or not _browser_inst.is_connected():
-        # Lanzamos el Chromium nativo de Termux que ya está instalado en el sistema
-        _browser_inst = await _playwright_inst.chromium.launch(
-            executable_path='/data/data/com.termux/files/usr/bin/chromium',
+        # Inicializamos usando el navegador Chromium nativo de Termux
+        _browser_inst = Chromium(
             headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-accelerated-2d-canvas",
-                "--no-first-run",
-                "--no-zygote",
-                "--single-process",
-                "--disable-gpu"
-            ]
+            executable_path='/data/data/com.termux/files/usr/bin/chromium'
         )
     
     if _page_inst and not _page_inst.is_closed():
         return _page_inst
+
+    _page_inst = _browser_inst.new_page()
+    return _page_inst
 
     context_kwargs = {"viewport": {"width": 1280, "height": 800}}
     if os.path.exists(SESSION_FILE) and os.path.getsize(SESSION_FILE) > 50:

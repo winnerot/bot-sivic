@@ -16,11 +16,18 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-from playwright_termux import Chromium
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
 import urllib3
 import pymysql
+
+# Selenium para automatización en Android/Termux
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
 # Librería para generar el PDF Profesional
 from reportlab.lib.pagesizes import letter
@@ -56,18 +63,45 @@ SENIAT_PASS = "v9684209"
 ADMIN_USER_ID = 2098655970  # <--- ID DE ADMINISTRADOR PRINCIPAL
 
 # Archivos de persistencia
-SESSION_FILE = "seniat_session.json"
 USERS_FILE = "authorized_users.txt"
 LOGS_FILE = "consultas_logs.txt"
 
 SESSION_DURATION = 30 * 60  # 30 minutos en segundos
 _last_successful_login = 0
 
-# Instancias globales para mantener la sesión persistente de Playwright y la cola de tareas
-_playwright_inst = None
-_browser_inst = None
-_page_inst = None
+# Instancia global del navegador Selenium y cerrojo de concurrencia
+_driver_inst = None
 consulta_lock = asyncio.Lock()
+
+
+# ==============================================================================
+# INICIALIZACIÓN DE SELENIUM EN TERMUX
+# ==============================================================================
+def get_or_create_driver():
+    global _driver_inst
+    if _driver_inst is not None:
+        try:
+            # Verifica si la instancia sigue viva realizando un chequeo de URL
+            _ = _driver_inst.current_url
+            return _driver_inst
+        except Exception:
+            try:
+                _driver_inst.quit()
+            except Exception:
+                pass
+            _driver_inst = None
+
+    chrome_options = Options()
+    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--window-size=1280,800")
+    chrome_options.binary_location = "/data/data/com.termux/files/usr/bin/chromium"
+
+    service = Service("/data/data/com.termux/files/usr/bin/chromedriver")
+    _driver_inst = webdriver.Chrome(service=service, options=chrome_options)
+    return _driver_inst
 
 
 # ==============================================================================
@@ -148,7 +182,7 @@ async def notificar_admin_consulta(bot, user, parametro_busqueda: str, tipo_cons
 # CONSULTA MYSQL (SERVIDOR SERV00.COM)
 # ==============================================================================
 def consultar_telefono_mysql(cedula: str) -> list:
-    """Consulta los números telefónicos mediante la API PHP alojada en serv00 vía HTTP y con mayor tiempo de espera."""
+    """Consulta los números telefónicos mediante la API PHP alojada en serv00 vía HTTP."""
     telefonos = []
     try:
         url = f"http://victor159.serv00.net/consulta.php?cedula={cedula}"
@@ -156,13 +190,23 @@ def consultar_telefono_mysql(cedula: str) -> list:
         
         if response.status_code == 200 and response.text.strip():
             telefonos = response.json()
-    except requests.exceptions.JSONDecodeError:
-        logger.error(f"El script PHP no devolvió un JSON válido. Respuesta: {response.text[:200]}")
-    except requests.exceptions.Timeout:
-        logger.error("La conexión con el script PHP en Serv00 tardó demasiado (Timeout).")
     except Exception as e:
         logger.error(f"Error al consultar el script PHP en serv00: {e}")
     return telefonos
+
+
+def consultar_inversa_mysql(telefono: str) -> list:
+    """Consulta la cédula asociada a un número telefónico mediante el script PHP en serv00."""
+    coincidencias = []
+    try:
+        url = f"http://victor159.serv00.net/consulta.php?telefono={telefono}"
+        response = requests.get(url, timeout=20, verify=False)
+        if response.status_code == 200 and response.text.strip():
+            coincidencias = response.json()
+    except Exception as e:
+        logger.error(f"Error en consulta por teléfono: {e}")
+    return coincidencias
+
 
 # ==============================================================================
 # COMANDOS DE ADMINISTRADOR
@@ -523,52 +567,6 @@ def generar_documento_pdf(
 
 
 # ==============================================================================
-# PLAYWRIGHT CORE FUNCTIONS (CONFIGURADO PARA ANDROID / TERMUX)
-# ==============================================================================
-async def get_or_create_page():
-    global _browser_inst, _page_inst
-    
-    try:
-        if not _browser_inst:
-            _browser_inst = Chromium(headless=True)
-        
-        if _page_inst and not _page_inst.is_closed():
-            return _page_inst
-    except Exception as e:
-        logger.error(f"Error conectando con Chromium via playwright-termux: {e}")
-        _browser_inst = Chromium(headless=True)
-
-    _page_inst = _browser_inst.new_page()
-    return _page_inst
-
-
-async def guardar_estado_sesion(page):
-    global _last_successful_login
-    try:
-        await page.context.storage_state(path=SESSION_FILE)
-        _last_successful_login = time.time()
-        print("-> [✓] Sesión y cookies guardadas exitosamente.")
-    except Exception as e:
-        logger.error(f"No se pudo guardar el estado de la sesión: {e}")
-
-
-# ==============================================================================
-# CONSULTAS TELEFONO
-# ==============================================================================
-def consultar_inversa_mysql(telefono: str) -> list:
-    """Consulta la cédula asociada a un número telefónico mediante el script PHP en serv00."""
-    coincidencias = []
-    try:
-        url = f"http://victor159.serv00.net/consulta.php?telefono={telefono}"
-        response = requests.get(url, timeout=20, verify=False)
-        if response.status_code == 200 and response.text.strip():
-            coincidencias = response.json()
-    except Exception as e:
-        logger.error(f"Error en consulta por teléfono: {e}")
-    return coincidencias
-
-
-# ==============================================================================
 # CONSULTAS PÚBLICAS (SENIAT EMPRESAS & IVSS)
 # ==============================================================================
 def consultar_seniat_y_nombre(cedula: str):
@@ -703,53 +701,52 @@ def consultar_ivss(cedula: str):
 
 
 # ==============================================================================
-# FUNCIÓN CENTRAL DE BÚSQUEDA Y EXTRACCIÓN (CÉDULA Y RIF)
+# FUNCIÓN CENTRAL DE BÚSQUEDA Y EXTRACCIÓN MEDIANTE SELENIUM
 # ==============================================================================
-async def ejecutar_consulta_rif(page, target_val: str, tipo_consulta: str, update: Update, msg_espera):
-    user_actual = update.effective_user
-
-    await notificar_admin_consulta(update.get_bot(), user_actual, target_val, tipo_consulta)
-
-    await page.goto("http://contribuyente.seniat.gob.ve/rifconsulta/login.do", timeout=30000)
-    await page.wait_for_load_state("networkidle")
+def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str):
+    driver = get_or_create_driver()
+    driver.get("http://contribuyente.seniat.gob.ve/rifconsulta/login.do")
+    
+    wait = WebDriverWait(driver, 15)
     
     if tipo_consulta == "RIF":
-        await page.wait_for_selector("input[name='rif']", timeout=15000)
-        await page.fill("input[name='rif']", target_val)
+        campo = wait.until(EC.presence_of_element_located((By.NAME, "rif")))
+        campo.clear()
+        campo.send_keys(target_val)
     else:
-        await page.wait_for_selector("input[name='cedula']", timeout=15000)
-        await page.fill("input[name='cedula']", f"V{target_val}")
+        campo = wait.until(EC.presence_of_element_located((By.NAME, "cedula")))
+        campo.clear()
+        campo.send_keys(f"V{target_val}")
 
-    await page.click("input[name='buscar']")
-    await asyncio.sleep(4)
+    btn_buscar = driver.find_element(By.NAME, "buscar")
+    btn_buscar.click()
+    time.sleep(3)
 
-    enlace_expediente = page.locator("a[href*='buscarexpediente.do']").first
-    if await enlace_expediente.count() == 0:
-        try:
-            await update.get_bot().delete_message(chat_id=update.effective_chat.id, message_id=msg_espera.message_id)
-        except Exception:
-            pass
-        await update.message.reply_text(f"❌ No se encontró ningún registro para `{target_val}`.", parse_mode="Markdown")
-        return
+    expedientes = driver.find_elements(By.XPATH, "//a[contains(@href, 'buscarexpediente.do')]")
+    if not expedientes:
+        return None
 
-    await enlace_expediente.click()
-    await asyncio.sleep(3)
+    expedientes[0].click()
+    time.sleep(2)
 
-    # 1. Extracción de Domicilio Fiscal
-    enlace_direcciones = page.locator("a.menuitem[href*='datosdirecciones.do']").first
-    if await enlace_direcciones.count() > 0:
-        await enlace_direcciones.click()
-        await asyncio.sleep(2)
+    # 1. Domicilio Fiscal
+    try:
+        dir_links = driver.find_elements(By.XPATH, "//a[contains(@class, 'menuitem') and contains(@href, 'datosdirecciones.do')]")
+        if dir_links:
+            dir_links[0].click()
+            time.sleep(1)
+        
+        dom_links = driver.find_elements(By.XPATH, "//a[contains(@href, 'datosdirecciones.do?consultar=S')]")
+        if dom_links:
+            dom_links[0].click()
+            time.sleep(1)
+    except Exception as e:
+        logger.error(f"Aviso navegando direcciones: {e}")
 
-    enlace_domicilio = page.locator("a[href*='datosdirecciones.do?consultar=S']").first
-    if await enlace_domicilio.count() > 0:
-        await enlace_domicilio.click()
-        await asyncio.sleep(2)
-
-    dir_info = await page.evaluate(r"""() => {
+    dir_info = driver.execute_script(r"""
         const tables = document.querySelectorAll('table');
         let t = Array.from(tables).find(tbl => tbl.innerText.includes('Tipo de Dirección') && tbl.innerText.includes('Estado'));
-        if (!t) return null;
+        if (!t) return [];
         const trs = t.querySelectorAll('tr');
         let resultados = [];
         for (let i = 0; i < trs.length - 1; i++) {
@@ -768,20 +765,17 @@ async def ejecutar_consulta_rif(page, target_val: str, tipo_consulta: str, updat
             }
         }
         return resultados;
-    }""")
+    """)
 
-    # 2. Extracción de Datos Básicos
-    await page.goto(f"http://contribuyente.seniat.gob.ve/rifconsulta/datosbasicos.do", timeout=30000)
-    await page.wait_for_load_state("networkidle")
-    await asyncio.sleep(2)
+    # 2. Datos Básicos
+    driver.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosbasicos.do")
+    time.sleep(2)
 
-    datos_basicos = await page.evaluate(r"""() => {
-        let info = { nombre_razon: 'NO INDICA', fecha_nacimiento: 'NO INDICA', correo: 'NO INDICA', estado_rif: 'NO INDICA' };
-        
+    datos_basicos = driver.execute_script(r"""
+        let info = { nombre_razon: 'NO INDICA', fecha_nacimiento: 'NO INDICA', correo: 'NO INDICA' };
         const tds = document.querySelectorAll('td, th');
         tds.forEach((td) => {
             let txt = td.innerText.replace(/\u00a0/g, ' ').trim().toUpperCase();
-            
             if (txt.includes('NOMBRE / RAZÓN SOCIAL') || txt.includes('NOMBRE') || txt.includes('RAZÓN SOCIAL')) {
                 const table = td.closest('table');
                 if (table) {
@@ -799,7 +793,6 @@ async def ejecutar_consulta_rif(page, target_val: str, tipo_consulta: str, updat
                     }
                 }
             }
-
             if (txt === 'FECHA DE NACIMIENTO' || txt.includes('CONSTITUCIÓN')) {
                 const table = td.closest('table');
                 if (table) {
@@ -817,7 +810,6 @@ async def ejecutar_consulta_rif(page, target_val: str, tipo_consulta: str, updat
                     }
                 }
             }
-            
             if (txt.includes('CORREO ELECTRÓNICO') || txt.includes('CORREO')) {
                 const table = td.closest('table');
                 if (table) {
@@ -827,120 +819,83 @@ async def ejecutar_consulta_rif(page, target_val: str, tipo_consulta: str, updat
                             const celdasValor = filas[r + 1].querySelectorAll('td');
                             celdasValor.forEach(cv => {
                                 let val = cv.innerText.replace(/\u00a0/g, ' ').trim();
-                                if (val.includes('@')) {
-                                    info.correo = val;
-                                }
+                                if (val.includes('@')) info.correo = val;
                             });
                         }
                     }
                 }
             }
         });
-        
         return info;
-    }""")
-
-    if datos_basicos['fecha_nacimiento'] == 'NO INDICA':
-        page_text = await page.inner_text('body')
-        match_fn = re.search(r'(?:Fecha de Nacimiento|Nacimiento|Constitución)[\s:]*([0-9]{2}[-/][0-9]{2}[-/][0-9]{4})', page_text, re.IGNORECASE)
-        if match_fn:
-            datos_basicos['fecha_nacimiento'] = match_fn.group(1)
-
-    if datos_basicos['correo'] == 'NO INDICA':
-        page_text = await page.inner_text('body')
-        match_mail = re.search(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+', page_text)
-        if match_mail:
-            datos_basicos['correo'] = match_mail.group(0)
-
-    edad_calculada = calcular_edad(datos_basicos['fecha_nacimiento'])
+    """)
 
     cargas_familiares = []
     relaciones_empresa = []
 
     if tipo_consulta == "CEDULA":
-        await page.goto(f"http://contribuyente.seniat.gob.ve/rifconsulta/datoscargasfamiliares.do", timeout=30000)
-        await page.wait_for_load_state("networkidle")
-        await asyncio.sleep(2)
-
-        cargas_familiares = []
-        links_count = await page.locator('a[href*="consultar=S&idCarga="]').count()
+        driver.get("http://contribuyente.seniat.gob.ve/rifconsulta/datoscargasfamiliares.do")
+        time.sleep(2)
         
-        for i in range(links_count):
-            await page.goto(f"http://contribuyente.seniat.gob.ve/rifconsulta/datoscargasfamiliares.do", timeout=30000)
-            await page.wait_for_load_state("networkidle")
-            
-            links = page.locator('a[href*="consultar=S&idCarga="]')
-            link = links.nth(i)
-            
-            parentesco = (await link.inner_text()).replace('\xa0', ' ').strip()
-            
-            await link.click()
-            await page.wait_for_load_state("networkidle")
-            await asyncio.sleep(1)
-            
-            detalle = await page.evaluate(r"""() => {
-                let nombres = 'NO INDICA';
-                let cedula = 'NO INDICA';
-                let fecha_nacimiento = 'NO INDICA';
-                let nro_informe_medico = 'NO INDICA';
+        links = driver.find_elements(By.XPATH, "//a[contains(@href, 'consultar=S&idCarga=')]")
+        num_links = len(links)
+        
+        for i in range(num_links):
+            driver.get("http://contribuyente.seniat.gob.ve/rifconsulta/datoscargasfamiliares.do")
+            time.sleep(1)
+            cur_links = driver.find_elements(By.XPATH, "//a[contains(@href, 'consultar=S&idCarga=')]")
+            if i < len(cur_links):
+                lnk = cur_links[i]
+                parentesco = lnk.text.strip()
+                lnk.click()
+                time.sleep(1)
                 
-                const rows = document.querySelectorAll('tr');
-                for (let r = 0; r < rows.length; r++) {
-                    let cells = rows[r].querySelectorAll('td');
-                    for (let c = 0; c < cells.length; c++) {
-                        let rawLabel = cells[c].innerText.replace(/\u00a0/g, ' ').trim().toUpperCase();
-                        let label = rawLabel.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-                        
-                        if (rows[r + 1]) {
-                            let nextCells = rows[r + 1].querySelectorAll('td');
-                            if (nextCells[c]) {
-                                let val = nextCells[c].innerText.replace(/\u00a0/g, ' ').trim();
-                                
-                                if (label.includes('NOMBRES') && val && val !== ':') {
-                                    nombres = val;
-                                }
-                                if ((label.includes('CEDULA') || label.includes('C.I.')) && val && val !== ':') {
-                                    if (val.length >= 6 && val.length <= 15) {
-                                        cedula = val;
+                detalle = driver.execute_script(r"""
+                    let nombres = 'NO INDICA', cedula = 'NO INDICA', fecha_nacimiento = 'NO INDICA', nro_informe_medico = 'NO INDICA';
+                    const rows = document.querySelectorAll('tr');
+                    for (let r = 0; r < rows.length; r++) {
+                        let cells = rows[r].querySelectorAll('td');
+                        for (let c = 0; c < cells.length; c++) {
+                            let rawLabel = cells[c].innerText.replace(/\u00a0/g, ' ').trim().toUpperCase();
+                            let label = rawLabel.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+                            if (rows[r + 1]) {
+                                let nextCells = rows[r + 1].querySelectorAll('td');
+                                if (nextCells[c]) {
+                                    let val = nextCells[c].innerText.replace(/\u00a0/g, ' ').trim();
+                                    if (label.includes('NOMBRES') && val && val !== ':') nombres = val;
+                                    if ((label.includes('CEDULA') || label.includes('C.I.')) && val && val !== ':') {
+                                        if (val.length >= 6 && val.length <= 15) cedula = val;
                                     }
-                                }
-                                if (label.includes('FECHA DE NACIMIENTO') && val && val !== ':') {
-                                    if (/^\d{2}\/\d{2}\/\d{4}$/.test(val)) {
-                                        fecha_nacimiento = val;
+                                    if (label.includes('FECHA DE NACIMIENTO') && val && val !== ':') {
+                                        if (/^\d{2}\/\d{2}\/\d{4}$/.test(val)) fecha_nacimiento = val;
                                     }
-                                }
-                                if ((label.includes('INFORME MEDICO') || label.includes('NRO. INFORME')) && val && val !== ':') {
-                                    if (val && val !== ':') {
-                                        nro_informe_medico = val;
+                                    if ((label.includes('INFORME MEDICO') || label.includes('NRO. INFORME')) && val && val !== ':') {
+                                        if (val && val !== ':') nro_informe_medico = val;
                                     }
                                 }
                             }
                         }
                     }
-                }
-                return { nombres, cedula, fecha_nacimiento, nro_informe_medico };
-            }""")
-            
-            cargas_familiares.append({
-                "parentesco": parentesco,
-                "nombres": detalle["nombres"],
-                "cedula": detalle["cedula"],
-                "fecha_nacimiento": detalle["fecha_nacimiento"],
-                "nro_informe_medico": detalle["nro_informe_medico"]
-            })
+                    return { nombres, cedula, fecha_nacimiento, nro_informe_medico };
+                """)
+                
+                cargas_familiares.append({
+                    "parentesco": parentesco,
+                    "nombres": detalle["nombres"],
+                    "cedula": detalle["cedula"],
+                    "fecha_nacimiento": detalle["fecha_nacimiento"],
+                    "nro_informe_medico": detalle["nro_informe_medico"]
+                })
 
         for carga in cargas_familiares:
             if carga.get('fecha_nacimiento') and carga['fecha_nacimiento'] != 'NO INDICA':
                 carga['edad'] = calcular_edad(carga['fecha_nacimiento'])
             else:
                 carga['edad'] = 'No calculable'
-                
-    if tipo_consulta == "RIF":
-        await page.goto(f"http://contribuyente.seniat.gob.ve/rifconsulta/datosrelaciones.do", timeout=30000)
-        await page.wait_for_load_state("networkidle")
-        await asyncio.sleep(2)
 
-        relaciones_empresa = await page.evaluate(r"""() => {
+    if tipo_consulta == "RIF":
+        driver.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosrelaciones.do")
+        time.sleep(2)
+        relaciones_empresa = driver.execute_script(r"""
             let rels = [];
             const trs = document.querySelectorAll('tr.letrasLista, tr.tablaFilas');
             for (const tr of trs) {
@@ -958,7 +913,36 @@ async def ejecutar_consulta_rif(page, target_val: str, tipo_consulta: str, updat
                 }
             }
             return rels;
-        }""")
+        """)
+
+    return {
+        "dir_info": dir_info,
+        "datos_basicos": datos_basicos,
+        "cargas_familiares": cargas_familiares,
+        "relaciones_empresa": relaciones_empresa
+    }
+
+
+async def ejecutar_consulta_rif(target_val: str, tipo_consulta: str, update: Update, msg_espera):
+    user_actual = update.effective_user
+    await notificar_admin_consulta(update.get_bot(), user_actual, target_val, tipo_consulta)
+
+    resultado_dict = await asyncio.to_thread(ejecutar_consulta_rif_sync, target_val, tipo_consulta)
+
+    if not resultado_dict:
+        try:
+            await update.get_bot().delete_message(chat_id=update.effective_chat.id, message_id=msg_espera.message_id)
+        except Exception:
+            pass
+        await update.message.reply_text(f"❌ No se encontró ningún registro para `{target_val}`.", parse_mode="Markdown")
+        return
+
+    dir_info = resultado_dict["dir_info"]
+    datos_basicos = resultado_dict["datos_basicos"]
+    cargas_familiares = resultado_dict["cargas_familiares"]
+    relaciones_empresa = resultado_dict["relaciones_empresa"]
+
+    edad_calculada = calcular_edad(datos_basicos['fecha_nacimiento'])
 
     nombre_persona, res_seniat_empresa, relaciones_publicas = "No especificado", "", []
     ivss_estructurado, res_ivss = [], ""
@@ -1084,7 +1068,62 @@ async def ejecutar_consulta_rif(page, target_val: str, tipo_consulta: str, updat
 
 
 # ==============================================================================
-# MANEJADOR DE MENSAJES Y ACCESO
+# MANEJADOR DE LOGIN Y CAPTCHA MEDIANTE SELENIUM
+# ==============================================================================
+def verificar_o_iniciar_sesion_sync():
+    global _last_successful_login
+    driver = get_or_create_driver()
+    tiempo_transcurrido = time.time() - _last_successful_login
+
+    if tiempo_transcurrido < SESSION_DURATION:
+        try:
+            driver.get("http://contribuyente.seniat.gob.ve/rifconsulta/login.do")
+            time.sleep(2)
+            if "iseniatlogin" not in driver.current_url.lower():
+                return False, None  # Sesión activa
+        except Exception:
+            pass
+
+    driver.get("http://contribuyente.seniat.gob.ve/iseniatlogin/contribuyente.do")
+    time.sleep(3)
+
+    captcha_elem = driver.find_element(By.XPATH, "//img[contains(@src, 'kapatch')]")
+    captcha_bytes = captcha_elem.screenshot_as_png
+    return True, captcha_bytes
+
+
+def login_con_captcha_sync(codigo_captcha: str):
+    global _last_successful_login
+    driver = get_or_create_driver()
+    
+    campo_user = driver.find_element(By.NAME, "usuario")
+    campo_pass = driver.find_element(By.NAME, "clave")
+    campo_captcha = driver.find_element(By.NAME, "kaptcha")
+
+    campo_user.clear()
+    campo_user.send_keys(SENIAT_USER)
+    campo_pass.clear()
+    campo_pass.send_keys(SENIAT_PASS)
+    campo_captcha.clear()
+    campo_captcha.send_keys(codigo_captcha)
+
+    driver.execute_script("validarIngreso()")
+    time.sleep(4)
+
+    try:
+        err_elem = driver.find_element(By.ID, "mensajeError")
+        err_txt = err_elem.text.strip()
+        if err_txt and "incorrecto" in err_txt.lower():
+            return False, err_txt
+    except Exception:
+        pass
+
+    _last_successful_login = time.time()
+    return True, ""
+
+
+# ==============================================================================
+# MANEJADOR DE MENSAJES TELEGRAM
 # ==============================================================================
 async def manejar_cedula_o_texto(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -1157,28 +1196,9 @@ async def manejar_cedula_o_texto(update: Update, context: ContextTypes.DEFAULT_T
     
     async with consulta_lock:
         try:
-            page = await get_or_create_page()
-            tiempo_transcurrido = time.time() - _last_successful_login
-            sesion_vigente = tiempo_transcurrido < SESSION_DURATION
-
-            necesita_login = True
-            if sesion_vigente:
-                try:
-                    await page.goto("http://contribuyente.seniat.gob.ve/rifconsulta/login.do", timeout=15000)
-                    await page.wait_for_load_state("networkidle", timeout=8000)
-                    if "iseniatlogin" not in page.url and (await page.locator("input[name='cedula']").count() > 0 or await page.locator("input[name='rif']").count() > 0):
-                        necesita_login = False
-                except Exception:
-                    necesita_login = True
+            necesita_login, captcha_bytes = await asyncio.to_thread(verificar_o_iniciar_sesion_sync)
 
             if necesita_login:
-                await page.goto("http://contribuyente.seniat.gob.ve/iseniatlogin/contribuyente.do", timeout=60000)
-                await page.wait_for_load_state("networkidle")
-
-                captcha_img = page.locator("img[src*='kapatch']")
-                await captcha_img.wait_for(timeout=10000)
-                captcha_bytes = await captcha_img.screenshot()
-
                 context.user_data["pending_target"] = parametro_busqueda
                 context.user_data["pending_tipo"] = tipo_consulta
 
@@ -1188,7 +1208,7 @@ async def manejar_cedula_o_texto(update: Update, context: ContextTypes.DEFAULT_T
                     pass
 
                 file_stream = io.BytesIO(captcha_bytes)
-                file_stream.name = "captcha_seniat.jpg"
+                file_stream.name = "captcha_seniat.png"
 
                 sent_msg = await update.message.reply_photo(
                     photo=file_stream,
@@ -1198,7 +1218,7 @@ async def manejar_cedula_o_texto(update: Update, context: ContextTypes.DEFAULT_T
                 context.user_data["captcha_msg_id"] = sent_msg.message_id
                 return ESPERANDO_CAPTCHA
             else:
-                await ejecutar_consulta_rif(page, parametro_busqueda, tipo_consulta, update, msg_espera)
+                await ejecutar_consulta_rif(parametro_busqueda, tipo_consulta, update, msg_espera)
                 return ConversationHandler.END
 
         except Exception as e:
@@ -1236,30 +1256,18 @@ async def recibir_captcha_y_consultar(update: Update, context: ContextTypes.DEFA
 
     async with consulta_lock:
         try:
-            page = await get_or_create_page()
-            await page.fill("input[name='usuario']", SENIAT_USER)
-            await page.fill("input[name='clave']", SENIAT_PASS)
-            await page.fill("input[name='kaptcha']", codigo_usuario)
+            exito, err_msg = await asyncio.to_thread(login_con_captcha_sync, codigo_usuario)
 
-            await page.evaluate("validarIngreso()")
-            await asyncio.sleep(4) 
-
-            error_locator = page.locator("#mensajeError")
-            error_text = await error_locator.inner_text() if await error_locator.count() > 0 else ""
-            
-            if error_text.strip() and "incorrecto" in error_text.lower():
+            if not exito:
                 try:
                     await update.get_bot().delete_message(chat_id=update.effective_chat.id, message_id=msg_espera.message_id)
                 except Exception:
                     pass
-                if os.path.exists(SESSION_FILE):
-                    os.remove(SESSION_FILE)
-                await update.message.reply_text(f"❌ El SENIAT rechazó el acceso: _{error_text.strip()}_. Envía la consulta de novo.", parse_mode="Markdown")
+                await update.message.reply_text(f"❌ El SENIAT rechazó el acceso: _{err_msg}_. Envía la consulta de nuevo.", parse_mode="Markdown")
                 context.user_data.clear()
                 return ConversationHandler.END
 
-            await guardar_estado_sesion(page)
-            await ejecutar_consulta_rif(page, target_val, tipo_consulta, update, msg_espera)
+            await ejecutar_consulta_rif(target_val, tipo_consulta, update, msg_espera)
 
         except Exception as e:
             logger.error(f"Error tras captcha: {e}")
@@ -1297,7 +1305,7 @@ def main():
 
     app.add_handler(conv_handler)
 
-    print("🤖 Bot activo con notificaciones al administrador en tiempo real...")
+    print("🤖 Bot activo con Selenium en Termux (Android)...")
     app.run_polling(bootstrap_retries=-1)
 
 

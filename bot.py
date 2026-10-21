@@ -99,8 +99,14 @@ def get_or_create_driver():
     chrome_options.add_argument("--window-size=1280,800")
     chrome_options.binary_location = "/data/data/com.termux/files/usr/bin/chromium"
 
-    # webdriver-manager se encarga de proveer el ejecutable de forma automática
-    service = Service(ChromeDriverManager().install())
+    # Ruta directa al ChromeDriver nativo de Termux
+    driver_path = "/data/data/com.termux/files/usr/bin/chromedriver"
+    
+    # Si no estuviera en bin, buscamos en binarios locales de python o del sistema
+    if not os.path.exists(driver_path):
+        driver_path = "chromedriver" # Intenta buscarlo en el PATH del sistema
+
+    service = Service(driver_path)
     _driver_inst = webdriver.Chrome(service=service, options=chrome_options)
     return _driver_inst
 

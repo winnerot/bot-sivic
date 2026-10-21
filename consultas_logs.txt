@@ -1,0 +1,132 @@
+[2026-09-19 13:50:55] | ID: 2098655970 | User: @usernamejma | Nombre: L | Cédula: V19913569
+[2026-09-19 14:11:46] | ID: 2098655970 | User: @usernamejma | Nombre: L | Cédula: V19792233
+[2026-09-19 14:20:17] | ID: 2098655970 | User: @usernamejma | Nombre: L | Cédula: V23790783
+[2026-10-13 09:47:55] | ID: 2098655970 | User: @usernamejma | Nombre: L | Tipo: CEDULA | Consulta: 2873686
+[2026-10-13 09:48:42] | ID: 5028892731 | User: Sin username | Nombre: J H | Tipo: CEDULA | Consulta: 12260329
+[2026-10-13 09:49:26] | ID: 2098655970 | User: @usernamejma | Nombre: L | Tipo: CEDULA | Consulta: 23790791
+[2026-10-13 09:49:55] | ID: 2098655970 | User: @usernamejma | Nombre: L | Tipo: CEDULA | Consulta: 23790791
+[2026-10-13 09:51:01] | ID: 5028892731 | User: Sin username | Nombre: J H | Tipo: RIF | Consulta: J40564470
+[2026-10-13 09:51:38] | ID: 5028892731 | User: Sin username | Nombre: J H | Tipo: RIF | Consulta: J405644370
+[2026-10-13 09:52:59] | ID: 2098655970 | User: @usernamejma | Nombre: L | Tipo: CEDULA | Consulta: 23790791
+[2026-10-13 09:59:55] | ID: 2098655970 | User: @usernamejma | Nombre: L | Tipo: CEDULA | Consulta: 17954252
+[2026-10-13 10:28:40] | ID: 2098655970 | User: @usernamejma | Nombre: L | Tipo: CEDULA | Consulta: 22338334
+[2026-10-13 10:30:34] | ID: 2098655970 | User: @usernamejma | Nombre: L | Tipo: CEDULA | Consulta: 31970304
+[2026-10-13 10:31:23] | ID: 1680407038 | User: @Oscarmirelly | Nombre: Oscar Mirelly | Tipo: CEDULA | Consulta: 19277252
+[2026-10-13 10:46:19] | ID: 1680407038 | User: @Oscarmirelly | Nombre: Oscar Mirelly | Tipo: CEDULA | Consulta: 26511850
+[2026-10-13 10:54:42] | ID: 1680407038 | User: @Oscarmirelly | Nombre: Oscar Mirelly | Tipo: CEDULA | Consulta: 21689763
+[2026-10-13 11:12:53] | ID: 2098655970 | User: @usernamejma | Nombre: L | Tipo: CEDULA | Consulta: 31721858
+[2026-10-13 12:05:37] | ID: 2098655970 | User: @usernamejma | Nombre: L | Tipo: CEDULA | Consulta: 23790791
+[2026-10-13 13:21:52] | ID: 2098655970 | User: @usernamejma | Nombre: L | Tipo: RIF | Consulta: J316685624
+[2026-10-13 14:08:53] | ID: 1680407038 | User: @Oscarmirelly | Nombre: Oscar Mirelly | Tipo: CEDULA | Consulta: 25448550
+[2026-10-13 14:09:05] | ID: 2098655970 | User: @usernamejma | Nombre: L | Tipo: CEDULA | Consulta: 23790791
+[2026-10-13 14:10:56] | ID: 2098655970 | User: @usernamejma | Nombre: L | Tipo: CEDULA | Consulta: 23790791
+[2026-10-13 14:12:33] | ID: 1680407038 | User: @Oscarmirelly | Nombre: Oscar Mirelly | Tipo: CEDULA | Consulta: 25448550
+[2026-10-13 14:19:49] | ID: 2098655970 | User: @usernamejma | Nombre: L | Tipo: CEDULA | Consulta: 23790791
+[2026-10-13 14:22:24] | ID: 2098655970 | User: @usernamejma | Nombre: L | Tipo: CEDULA | Consulta: 23790791
+[2026-10-13 14:44:36] | ID: 1680407038 | User: @Oscarmirelly | Nombre: Oscar Mirelly | Tipo: CEDULA | Consulta: 25069971
+[2026-10-13 14:46:38] | ID: 1680407038 | User: @Oscarmirelly | Nombre: Oscar Mirelly | Tipo: CEDULA | Consulta: 25448550
+[2026-10-13 14:49:42] | ID: 1680407038 | User: @Oscarmirelly | Nombre: Oscar Mirelly | Tipo: CEDULA | Consulta: 21166245
+[2026-10-13 15:01:53] | ID: 1680407038 | User: @Oscarmirelly | Nombre: Oscar Mirelly | Tipo: CEDULA | Consulta: 15180037
+[2026-10-13 18:11:35] | ID: 2098655970 | User: @usernamejma | Nombre: L | Tipo: CEDULA | Consulta: 27326848
+[2026-10-13 18:48:26] | ID: 1680407038 | User: @Oscarmirelly | Nombre: Oscar Mirelly | Tipo: CEDULA | Consulta: 7268680
+[2026-10-14 06:21:18] | ID: 2098655970 | User: @usernamejma | Nombre: L | Tipo: CEDULA | Consulta: 2398654
+[2026-10-14 06:22:31] | ID: 2098655970 | User: @usernamejma | Nombre: L | Tipo: CEDULA | Consulta: 11791424
+[2026-10-14 06:29:22] | ID: 2098655970 | User: @usernamejma | Nombre: L | Tipo: CEDULA | Consulta: 18859837
+[2026-10-14 07:35:28] | ID: 1680407038 | User: @Oscarmirelly | Nombre: Oscar Mirelly | Tipo: CEDULA | Consulta: 23785670
+[2026-10-14 07:40:51] | ID: 2098655970 | User: @usernamejma | Nombre: L | Tipo: CEDULA | Consulta: 14083664
+[2026-10-14 07:42:52] | ID: 2098655970 | User: @usernamejma | Nombre: L | Tipo: CEDULA | Consulta: 16299464
+[2026-10-14 07:44:03] | ID: 2098655970 | User: @usernamejma | Nombre: L | Tipo: CEDULA | Consulta: 11791424
+[2026-10-14 08:21:01] | ID: 2098655970 | User: @usernamejma | Nombre: L | Tipo: CEDULA | Consulta: 26177209
+[2026-10-14 08:21:54] | ID: 2098655970 | User: @usernamejma | Nombre: L | Tipo: CEDULA | Consulta: 13523367
+[2026-10-14 08:23:07] | ID: 2098655970 | User: @usernamejma | Nombre: L | Tipo: CEDULA | Consulta: 27521641
+[2026-10-14 08:23:45] | ID: 2098655970 | User: @usernamejma | Nombre: L | Tipo: CEDULA | Consulta: 13676165
+[2026-10-14 10:14:40] | ID: 1680407038 | User: @Oscarmirelly | Nombre: Oscar Mirelly | Tipo: CEDULA | Consulta: 14355340
+[2026-10-14 10:54:18] | ID: 2098655970 | User: @usernamejma | Nombre: L | Tipo: CEDULA | Consulta: 26472991
+[2026-10-14 11:34:03] | ID: 2098655970 | User: @usernamejma | Nombre: L | Tipo: CEDULA | Consulta: 19947558
+[2026-10-15 08:33:55] | ID: 5028892731 | User: Sin username | Nombre: J H | Tipo: CEDULA | Consulta: 9691831
+[2026-10-15 08:35:36] | ID: 2098655970 | User: @usernamejma | Nombre: L | Tipo: CEDULA | Consulta: 29581174
+[2026-10-15 08:36:13] | ID: 1509251461 | User: @Pedrocarapaica | Nombre: D J | Tipo: CEDULA | Consulta: 27289134
+[2026-10-15 08:36:48] | ID: 1509251461 | User: @Pedrocarapaica | Nombre: D J | Tipo: CEDULA | Consulta: 27289134
+[2026-10-15 08:37:25] | ID: 5028892731 | User: Sin username | Nombre: J H | Tipo: CEDULA | Consulta: 9691831
+[2026-10-15 09:14:59] | ID: 2098655970 | User: @usernamejma | Nombre: L | Tipo: CEDULA | Consulta: 12854838
+[2026-10-16 08:14:06] | ID: 2098655970 | User: @usernamejma | Nombre: L | Tipo: RIF | Consulta: J506967090
+[2026-10-16 11:48:22] | ID: 1509251461 | User: @Pedrocarapaica | Nombre: D J | Tipo: CEDULA | Consulta: 11703676
+[2026-10-16 11:49:18] | ID: 1509251461 | User: @Pedrocarapaica | Nombre: D J | Tipo: CEDULA | Consulta: 11703676
+[2026-10-16 11:50:12] | ID: 1509251461 | User: @Pedrocarapaica | Nombre: D J | Tipo: CEDULA | Consulta: 84416989
+[2026-10-16 12:22:41] | ID: 5028892731 | User: Sin username | Nombre: J H | Tipo: CEDULA | Consulta: 18043124
+[2026-10-16 12:30:31] | ID: 1763052243 | User: Sin username | Nombre: Beltrán G. #DeLaManoCnDios* | Tipo: CEDULA | Consulta: 14914840
+[2026-10-16 17:20:57] | ID: 1763052243 | User: Sin username | Nombre: Beltrán G. #DeLaManoCnDios* | Tipo: CEDULA | Consulta: 17348641
+[2026-10-18 10:22:46] | ID: 1763052243 | User: Sin username | Nombre: Beltrán G. #DeLaManoCnDios* | Tipo: CEDULA | Consulta: 30137810
+[2026-10-18 11:59:59] | ID: 1763052243 | User: Sin username | Nombre: Beltrán G. #DeLaManoCnDios* | Tipo: RIF | Consulta: V226717780
+[2026-10-18 12:00:08] | ID: 1763052243 | User: Sin username | Nombre: Beltrán G. #DeLaManoCnDios* | Tipo: CEDULA | Consulta: 226717780
+[2026-10-18 12:00:37] | ID: 2098655970 | User: @usernamejma | Nombre: L | Tipo: CEDULA | Consulta: 23780781
+[2026-10-18 13:05:02] | ID: 1763052243 | User: Sin username | Nombre: Beltrán G. #DeLaManoCnDios* | Tipo: CEDULA | Consulta: 22671780
+[2026-10-18 14:14:04] | ID: 1763052243 | User: Sin username | Nombre: Beltrán G. #DeLaManoCnDios* | Tipo: CEDULA | Consulta: 30211340
+[2026-10-19 02:48:51] | ID: 2098655970 | User: @usernamejma | Nombre: L | Tipo: CEDULA | Consulta: 32860476
+[2026-10-19 02:49:45] | ID: 1763052243 | User: Sin username | Nombre: Beltrán G. #DeLaManoCnDios* | Tipo: CEDULA | Consulta: 30137810
+[2026-10-19 10:31:26] | ID: 5028892731 | User: Sin username | Nombre: J H | Tipo: CEDULA | Consulta: 28380001
+[2026-10-19 11:48:52] | ID: 5028892731 | User: Sin username | Nombre: J H | Tipo: CEDULA | Consulta: 15648210
+[2026-10-19 11:49:42] | ID: 5028892731 | User: Sin username | Nombre: J H | Tipo: CEDULA | Consulta: 19698200
+[2026-10-19 11:51:59] | ID: 5028892731 | User: Sin username | Nombre: J H | Tipo: CEDULA | Consulta: 19698200
+[2026-10-19 12:01:19] | ID: 1509251461 | User: @Pedrocarapaica | Nombre: D J | Tipo: CEDULA | Consulta: 9690757
+[2026-10-19 12:02:53] | ID: 1509251461 | User: @Pedrocarapaica | Nombre: D J | Tipo: CEDULA | Consulta: 25464222
+[2026-10-19 12:04:08] | ID: 1509251461 | User: @Pedrocarapaica | Nombre: D J | Tipo: CEDULA | Consulta: 15609631
+[2026-10-19 12:04:58] | ID: 1509251461 | User: @Pedrocarapaica | Nombre: D J | Tipo: CEDULA | Consulta: 22697805
+[2026-10-19 13:03:30] | ID: 1763052243 | User: Sin username | Nombre: Beltrán G. #DeLaManoCnDios* | Tipo: CEDULA | Consulta: 27427374
+[2026-10-19 13:14:00] | ID: 2098655970 | User: @usernamejma | Nombre: L | Tipo: CEDULA | Consulta: 17575467
+[2026-10-19 13:19:52] | ID: 2098655970 | User: @usernamejma | Nombre: L | Tipo: CEDULA | Consulta: 26320294
+[2026-10-19 13:32:49] | ID: 2098655970 | User: @usernamejma | Nombre: L | Tipo: CEDULA | Consulta: 20055328
+[2026-10-19 14:06:47] | ID: 1509251461 | User: @Pedrocarapaica | Nombre: D J | Tipo: RIF | Consulta: J401084800
+[2026-10-19 14:06:57] | ID: 5028892731 | User: Sin username | Nombre: J H | Tipo: CEDULA | Consulta: 16098040
+[2026-10-19 14:08:09] | ID: 5028892731 | User: Sin username | Nombre: J H | Tipo: CEDULA | Consulta: 16098040
+[2026-10-19 14:09:13] | ID: 5028892731 | User: Sin username | Nombre: J H | Tipo: CEDULA | Consulta: 23802334
+[2026-10-19 14:10:19] | ID: 1509251461 | User: @Pedrocarapaica | Nombre: D J | Tipo: CEDULA | Consulta: 12584070
+[2026-10-19 14:11:29] | ID: 1509251461 | User: @Pedrocarapaica | Nombre: D J | Tipo: CEDULA | Consulta: 3834594
+[2026-10-19 14:12:12] | ID: 5028892731 | User: Sin username | Nombre: J H | Tipo: CEDULA | Consulta: 17251819
+[2026-10-19 14:53:56] | ID: 5028892731 | User: Sin username | Nombre: J H | Tipo: CEDULA | Consulta: 36307099
+[2026-10-19 14:55:38] | ID: 2098655970 | User: @usernamejma | Nombre: L | Tipo: CEDULA | Consulta: 10998663
+[2026-10-19 15:43:19] | ID: 5028892731 | User: Sin username | Nombre: J H | Tipo: CEDULA | Consulta: 16268693
+[2026-10-19 16:47:11] | ID: 5028892731 | User: Sin username | Nombre: J H | Tipo: CEDULA | Consulta: 30835984
+[2026-10-19 16:47:40] | ID: 5028892731 | User: Sin username | Nombre: J H | Tipo: CEDULA | Consulta: 30835984
+[2026-10-19 16:48:59] | ID: 5028892731 | User: Sin username | Nombre: J H | Tipo: CEDULA | Consulta: 15481597
+[2026-10-19 16:54:18] | ID: 5028892731 | User: Sin username | Nombre: J H | Tipo: CEDULA | Consulta: 18691018
+[2026-10-19 17:17:45] | ID: 5028892731 | User: Sin username | Nombre: J H | Tipo: RIF | Consulta: J502017615
+[2026-10-20 04:28:49] | ID: 2098655970 | User: @usernamejma | Nombre: L | Tipo: CEDULA | Consulta: 2387644
+[2026-10-20 04:29:36] | ID: 5028892731 | User: Sin username | Nombre: J H | Tipo: CEDULA | Consulta: 31607847
+[2026-10-20 13:29:26] | ID: 6463700182 | User: @AngelesOrtiz_2002 | Nombre: Riczabeth Ortiz | Tipo: CEDULA | Consulta: 8778419
+[2026-10-20 13:32:50] | ID: 6463700182 | User: @AngelesOrtiz_2002 | Nombre: Riczabeth Ortiz | Tipo: CEDULA | Consulta: 8369548
+[2026-10-20 13:34:18] | ID: 6463700182 | User: @AngelesOrtiz_2002 | Nombre: Riczabeth Ortiz | Tipo: CEDULA | Consulta: 8820619
+[2026-10-20 13:36:48] | ID: 6463700182 | User: @AngelesOrtiz_2002 | Nombre: Riczabeth Ortiz | Tipo: CEDULA | Consulta: 8827969
+[2026-10-20 13:38:35] | ID: 6463700182 | User: @AngelesOrtiz_2002 | Nombre: Riczabeth Ortiz | Tipo: CEDULA | Consulta: 8827969
+[2026-10-20 13:40:18] | ID: 6463700182 | User: @AngelesOrtiz_2002 | Nombre: Riczabeth Ortiz | Tipo: CEDULA | Consulta: 8369548
+[2026-10-20 13:42:04] | ID: 6463700182 | User: @AngelesOrtiz_2002 | Nombre: Riczabeth Ortiz | Tipo: CEDULA | Consulta: 17470254
+[2026-10-20 13:43:18] | ID: 6463700182 | User: @AngelesOrtiz_2002 | Nombre: Riczabeth Ortiz | Tipo: CEDULA | Consulta: 13573602
+[2026-10-20 13:45:17] | ID: 6463700182 | User: @AngelesOrtiz_2002 | Nombre: Riczabeth Ortiz | Tipo: CEDULA | Consulta: 19004861
+[2026-10-21 09:53:34] | ID: 1763052243 | User: Sin username | Nombre: Beltrán G. #DeLaManoCnDios* | Tipo: CEDULA | Consulta: 12854838
+[2026-10-21 09:55:12] | ID: 5028892731 | User: Sin username | Nombre: J H | Tipo: CEDULA | Consulta: 36307099
+[2026-10-21 09:55:20] | ID: 5028892731 | User: Sin username | Nombre: J H | Tipo: CEDULA | Consulta: 9668299
+[2026-10-21 09:55:55] | ID: 6463700182 | User: @AngelesOrtiz_2002 | Nombre: Riczabeth Ortiz | Tipo: CEDULA | Consulta: 29837490
+[2026-10-21 09:56:31] | ID: 5028892731 | User: Sin username | Nombre: J H | Tipo: CEDULA | Consulta: 29574243
+[2026-10-21 09:57:14] | ID: 1763052243 | User: Sin username | Nombre: Beltrán G. #DeLaManoCnDios* | Tipo: CEDULA | Consulta: 12854838
+[2026-10-21 09:58:26] | ID: 2098655970 | User: @usernamejma | Nombre: L | Tipo: CEDULA | Consulta: 14675021
+[2026-10-21 09:59:03] | ID: 2098655970 | User: @usernamejma | Nombre: L | Tipo: CEDULA | Consulta: 14675021
+[2026-10-21 10:00:14] | ID: 2098655970 | User: @usernamejma | Nombre: L | Tipo: CEDULA | Consulta: 14675021
+[2026-10-21 10:00:52] | ID: 2098655970 | User: @usernamejma | Nombre: L | Tipo: CEDULA | Consulta: 14675021
+[2026-10-21 10:01:27] | ID: 2098655970 | User: @usernamejma | Nombre: L | Tipo: CEDULA | Consulta: 377744
+[2026-10-21 10:02:03] | ID: 2098655970 | User: @usernamejma | Nombre: L | Tipo: CEDULA | Consulta: 3883663
+[2026-10-21 10:02:44] | ID: 1763052243 | User: Sin username | Nombre: Beltrán G. #DeLaManoCnDios* | Tipo: CEDULA | Consulta: 16763436
+[2026-10-21 10:07:59] | ID: 1763052243 | User: Sin username | Nombre: Beltrán G. #DeLaManoCnDios* | Tipo: CEDULA | Consulta: 31797423
+[2026-10-21 10:14:17] | ID: 1763052243 | User: Sin username | Nombre: Beltrán G. #DeLaManoCnDios* | Tipo: CEDULA | Consulta: 17577599
+[2026-10-21 10:15:01] | ID: 1509251461 | User: @Pedrocarapaica | Nombre: D J | Tipo: CEDULA | Consulta: 25827203
+[2026-10-21 10:17:03] | ID: 1763052243 | User: Sin username | Nombre: Beltrán G. #DeLaManoCnDios* | Tipo: CEDULA | Consulta: 19004198
+[2026-10-21 10:19:13] | ID: 1509251461 | User: @Pedrocarapaica | Nombre: D J | Tipo: RIF | Consulta: EPACHAMOCA
+[2026-10-21 10:20:15] | ID: 1763052243 | User: Sin username | Nombre: Beltrán G. #DeLaManoCnDios* | Tipo: CEDULA | Consulta: 32112427
+[2026-10-21 10:20:26] | ID: 1509251461 | User: @Pedrocarapaica | Nombre: D J | Tipo: RIF | Consulta: J508046862
+[2026-10-21 10:21:25] | ID: 1763052243 | User: Sin username | Nombre: Beltrán G. #DeLaManoCnDios* | Tipo: CEDULA | Consulta: 16377415
+[2026-10-21 10:23:29] | ID: 1763052243 | User: Sin username | Nombre: Beltrán G. #DeLaManoCnDios* | Tipo: CEDULA | Consulta: 29587782
+[2026-10-21 10:25:13] | ID: 1509251461 | User: @Pedrocarapaica | Nombre: D J | Tipo: RIF | Consulta: J505302043
+[2026-10-21 10:26:39] | ID: 1763052243 | User: Sin username | Nombre: Beltrán G. #DeLaManoCnDios* | Tipo: CEDULA | Consulta: 25587782
+[2026-10-21 10:27:14] | ID: 1509251461 | User: @Pedrocarapaica | Nombre: D J | Tipo: RIF | Consulta: J500309287
+[2026-10-21 10:28:49] | ID: 1763052243 | User: Sin username | Nombre: Beltrán G. #DeLaManoCnDios* | Tipo: CEDULA | Consulta: 21970304
+[2026-10-21 10:29:00] | ID: 1763052243 | User: Sin username | Nombre: Beltrán G. #DeLaManoCnDios* | Tipo: CEDULA | Consulta: 31970304
+[2026-10-21 10:31:01] | ID: 1763052243 | User: Sin username | Nombre: Beltrán G. #DeLaManoCnDios* | Tipo: CEDULA | Consulta: 22338334

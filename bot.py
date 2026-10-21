@@ -1,29 +1,3 @@
-import sys
-import types
-
-# ==============================================================================
-# PARCHE DE COMPATIBILIDAD PLAYWRIGHT PARA TERMUX / ANDROID
-# ==============================================================================
-if "playwright" not in sys.modules:
-    mock_playwright = types.ModuleType("playwright")
-    mock_async_api = types.ModuleType("playwright.async_api")
-    
-    # Creamos un administrador de contexto asíncrono real (mock) para engañar a termux-playwright
-    class DummyAsyncContextManager:
-        async def __aenter__(self):
-            raise RuntimeError("Usando termux_playwright en Android")
-        async def __aexit__(self, exc_type, exc_val, exc_tb):
-            pass
-
-    def async_playwright_dummy():
-        return DummyAsyncContextManager()
-
-    mock_async_api.async_playwright = async_playwright_dummy
-    mock_playwright.async_api = mock_async_api
-    
-    sys.modules["playwright"] = mock_playwright
-    sys.modules["playwright.async_api"] = mock_async_api
-
 import asyncio
 import io
 import logging
@@ -554,13 +528,24 @@ def generar_documento_pdf(
 async def get_or_create_page():
     global _playwright_inst, _browser_inst, _page_inst
     if not _playwright_inst:
+        # Inicializamos el objeto de playwright directamente
         _playwright_inst = await async_playwright_termux().__aenter__()
         
     if not _browser_inst or not _browser_inst.is_connected():
+        # Lanzamos el Chromium nativo de Termux que ya está instalado en el sistema
         _browser_inst = await _playwright_inst.chromium.launch(
             executable_path='/data/data/com.termux/files/usr/bin/chromium',
             headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage"]
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-accelerated-2d-canvas",
+                "--no-first-run",
+                "--no-zygote",
+                "--single-process",
+                "--disable-gpu"
+            ]
         )
     
     if _page_inst and not _page_inst.is_closed():

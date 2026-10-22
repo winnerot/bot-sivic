@@ -512,9 +512,10 @@ def generar_documento_pdf(
 
 
 # ==============================================================================
-# CONSULTAS PÚBLICAS Y AUTENTICADAS (SENIAT & IVSS MEDIANTE REQUESTS)
+# CONSULTAS PÚBLICAS (SENIAT & IVSS MEDIANTE REQUESTS)
 # ==============================================================================
 def consultar_seniat_y_nombre(cedula: str):
+    """Consulta la API pública del SENIAT para obtener nombre y RIF exacto con dígito verificador."""
     url = f"http://contribuyente.seniat.gob.ve/relacionesrif/inicioConsulta.do?personalidad=1&ci={cedula}"
     try:
         response = seniat_session.get(url, timeout=12, verify=False)
@@ -523,16 +524,21 @@ def consultar_seniat_y_nombre(cedula: str):
             texto_total = soup.get_text(separator=" ", strip=True)
 
             if any(kw in texto_total.lower() for kw in ["no existe", "no se encuentra", "error", "invalida"]):
-                return "No especificado", "❌ *SENIAT (EMPRESA):* La cédula no se encuentra registrada.", []
+                return "No especificado", "", "❌ *SENIAT (EMPRESA):* La cédula no se encuentra registrada.", []
 
             nombre_persona = "No especificado"
+            rif_encontrado = ""
+
             for td in soup.find_all("td"):
                 texto_td = td.get_text(strip=True)
                 if "NOMBRE:" in texto_td.upper() or "NOMBRE" in texto_td.upper():
                     cleaned = re.sub(r"nombre\s*:\s*", "", texto_td, flags=re.IGNORECASE).strip()
                     if cleaned:
                         nombre_persona = cleaned
-                        break
+                if "RIF:" in texto_td.upper() or "RIF" in texto_td.upper():
+                    m = re.search(r"([VJEG]\d{8,9})", texto_td.upper().replace("-", ""))
+                    if m:
+                        rif_encontrado = m.group(1)
 
             relaciones = []
             for table in soup.find_all("table"):
@@ -560,12 +566,12 @@ def consultar_seniat_y_nombre(cedula: str):
             else:
                 resultado_empresas += "ℹ️ *No se encontraron empresas o relaciones asociadas.*\n"
             
-            return nombre_persona, resultado_empresas.strip(), relaciones
+            return nombre_persona, rif_encontrado, resultado_empresas.strip(), relaciones
         
-        return "No especificado", "❌ *SENIAT (EMPRESA):* Error de conexión.", []
+        return "No especificado", "", "❌ *SENIAT (EMPRESA):* Error de conexión.", []
     except Exception as e:
         logger.error(f"Error SENIAT: {e}")
-        return "No especificado", "❌ *SENIAT (EMPRESA):* Error en la petición HTTP.", []
+        return "No especificado", "", "❌ *SENIAT (EMPRESA):* Error en la petición HTTP.", []
 
 
 def consultar_ivss(cedula: str):
@@ -639,16 +645,19 @@ def consultar_ivss(cedula: str):
 
 
 # ==============================================================================
-# FUNCIÓN CENTRAL DE EXTRACCIÓN DETALLADA (SENIAT - REQUESTS & BS4)
+# FUNCIÓN CENTRAL DE EXTRACCIÓN DETALLADA (SENIAT AUTENTICADO)
 # ==============================================================================
-def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str):
+def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: str = ""):
     try:
         url_inicio_consulta = "http://contribuyente.seniat.gob.ve/rifconsulta/login.do"
         seniat_session.get(url_inicio_consulta, timeout=12, verify=False)
 
+        # Usamos el RIF exacto si está disponible
+        rif_usar = rif_exacto if rif_exacto else (target_val if tipo_consulta == "RIF" else f"V{target_val}")
+
         payload_busqueda = {
-            "rif": target_val if tipo_consulta == "RIF" else "",
-            "cedula": target_val if tipo_consulta == "CEDULA" else "",
+            "rif": rif_usar,
+            "cedula": "",
             "buscar": "Buscar"
         }
 
@@ -680,7 +689,7 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str):
 
         ref_internal = "http://contribuyente.seniat.gob.ve/rifconsulta/buscarexpediente.do"
 
-        # 1. Extracción de Datos Básicos
+        # 1. Extracción de Datos Básicos (Nombre, Fecha Nacimiento, Correo)
         datos_basicos = {"nombre_razon": "NO INDICA", "fecha_nacimiento": "NO INDICA", "correo": "NO INDICA"}
         try:
             resp_basicos = seniat_session.get(
@@ -822,7 +831,17 @@ async def ejecutar_consulta_rif(target_val: str, tipo_consulta: str, update: Upd
     user_actual = update.effective_user
     await notificar_admin_consulta(update.get_bot(), user_actual, target_val, tipo_consulta)
 
-    resultado_dict = await asyncio.to_thread(ejecutar_consulta_rif_sync, target_val, tipo_consulta)
+    nombre_persona, rif_exacto, res_seniat_empresa, relaciones_publicas = "No especificado", "", "", []
+    ivss_estructurado, res_ivss = [], ""
+    telefonos_registrados = []
+    
+    if tipo_consulta == "CEDULA":
+        nombre_persona, rif_exacto, res_seniat_empresa, relaciones_publicas = await asyncio.to_thread(consultar_seniat_y_nombre, target_val)
+        ivss_estructurado, res_ivss = await asyncio.to_thread(consultar_ivss, target_val)
+        telefonos_registrados = await asyncio.to_thread(consultar_telefono_mysql, target_val)
+
+    # Pasamos el RIF exacto a la consulta autenticada para garantizar la apertura del expediente
+    resultado_dict = await asyncio.to_thread(ejecutar_consulta_rif_sync, target_val, tipo_consulta, rif_exacto)
 
     if not resultado_dict:
         try:
@@ -838,16 +857,6 @@ async def ejecutar_consulta_rif(target_val: str, tipo_consulta: str, update: Upd
     relaciones_empresa = resultado_dict["relaciones_empresa"]
 
     edad_calculada = calcular_edad(datos_basicos['fecha_nacimiento'])
-
-    nombre_persona, res_seniat_empresa, relaciones_publicas = "No especificado", "", []
-    ivss_estructurado, res_ivss = [], ""
-    telefonos_registrados = []
-    
-    if tipo_consulta == "CEDULA":
-        nombre_persona, res_seniat_empresa, relaciones_publicas = await asyncio.to_thread(consultar_seniat_y_nombre, target_val)
-        ivss_estructurado, res_ivss = await asyncio.to_thread(consultar_ivss, target_val)
-        telefonos_registrados = await asyncio.to_thread(consultar_telefono_mysql, target_val)
-
     nombre_final = nombre_persona if (nombre_persona and nombre_persona != "No especificado") else datos_basicos['nombre_razon']
     cedula_rif_str = f"V-{target_val}" if tipo_consulta == "CEDULA" else target_val
 

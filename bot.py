@@ -620,17 +620,20 @@ def consultar_ivss(cedula: str):
 
 
 # ==============================================================================
-# MOTOR HTTP COMPLETO DE SCRAPING DE EXPEDIENTE (CORREGIDO Y CON TRAZAS DEBUG)
+# MOTOR HTTP SCRAPING DE EXPEDIENTE (INYECTANDO JSESSIONID EN URLS)
 # ==============================================================================
 def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: str = ""):
     try:
         url_inicio = "http://contribuyente.seniat.gob.ve/rifconsulta/login.do"
         resp_ini = seniat_session.get(url_inicio, timeout=12, verify=False)
-        print(f"[DEBUG] Acceso a login.do -> Status: {resp_ini.status_code}")
 
-        # Corrección aplicada: Limpieza estricta y formato sin ceros adicionales
+        # Extraer el JSESSIONID activo de las cookies
+        jsessionid = seniat_session.cookies.get("JSESSIONID")
+        jsession_suffix = f";jsessionid={jsessionid}" if jsessionid else ""
+
+        cedula_limpia = re.sub(r"\D", "", target_val)
         if tipo_consulta == "CEDULA":
-            rif_usar = f"V{target_val.strip()}"
+            rif_usar = f"V{cedula_limpia}"
         else:
             rif_usar = rif_exacto if rif_exacto else target_val.strip()
 
@@ -640,8 +643,8 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: 
             "buscar": "Buscar"
         }
 
-        resp_busqueda = seniat_session.post(url_inicio, data=payload, headers={"Referer": url_inicio}, timeout=15, verify=False)
-        print(f"[DEBUG] POST búsqueda RIF/Cédula ({rif_usar}) -> Status: {resp_busqueda.status_code}")
+        url_post_busqueda = f"http://contribuyente.seniat.gob.ve/rifconsulta/login.do{jsession_suffix}"
+        resp_busqueda = seniat_session.post(url_post_busqueda, data=payload, headers={"Referer": url_inicio}, timeout=15, verify=False)
 
         soup_b = BeautifulSoup(resp_busqueda.text, "html.parser")
 
@@ -653,22 +656,19 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: 
                     url_expediente = "http://contribuyente.seniat.gob.ve/rifconsulta/" + url_expediente.lstrip("/")
                 break
 
-        print(f"[DEBUG] URL de expediente encontrada: {url_expediente}")
-
         if url_expediente:
-            resp_exp = seniat_session.get(url_expediente, headers={"Referer": url_inicio}, timeout=12, verify=False)
-            print(f"[DEBUG] Visita a expediente -> Status: {resp_exp.status_code}")
+            seniat_session.get(url_expediente, headers={"Referer": url_inicio}, timeout=12, verify=False)
         else:
-            fallback_url = f"http://contribuyente.seniat.gob.ve/rifconsulta/buscarexpediente.do?rif={rif_usar}"
+            fallback_url = f"http://contribuyente.seniat.gob.ve/rifconsulta/buscarexpediente.do{jsession_suffix}?rif={rif_usar}"
             seniat_session.get(fallback_url, headers={"Referer": url_inicio}, timeout=12, verify=False)
 
-        ref_expediente = url_expediente if url_expediente else "http://contribuyente.seniat.gob.ve/rifconsulta/buscarexpediente.do"
+        ref_expediente = url_expediente if url_expediente else f"http://contribuyente.seniat.gob.ve/rifconsulta/buscarexpediente.do{jsession_suffix}"
 
         # 1. DATOS BÁSICOS
         datos_basicos = {"nombre_razon": "NO INDICA", "fecha_nacimiento": "NO INDICA", "correo": "NO INDICA"}
         try:
-            resp_db = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosbasicos.do", headers={"Referer": ref_expediente}, timeout=12, verify=False)
-            print(f"[DEBUG] Datos Básicos URL -> Status: {resp_db.status_code}")
+            url_db = f"http://contribuyente.seniat.gob.ve/rifconsulta/datosbasicos.do{jsession_suffix}"
+            resp_db = seniat_session.get(url_db, headers={"Referer": ref_expediente}, timeout=12, verify=False)
             soup_db = BeautifulSoup(resp_db.text, "html.parser")
 
             for tr in soup_db.find_all("tr"):
@@ -691,13 +691,13 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: 
                         val = td.get_text(strip=True)
                         if "@" in val: datos_basicos["correo"] = val
         except Exception as e:
-            print(f"[ERROR] Excepción en datos básicos: {e}")
+            logger.error(f"Excepción en datos básicos: {e}")
 
         # 2. DIRECCIONES
         dir_info = []
         try:
-            resp_dir = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosdirecciones.do?consultar=S", headers={"Referer": ref_expediente}, timeout=12, verify=False)
-            print(f"[DEBUG] Direcciones URL -> Status: {resp_dir.status_code}")
+            url_dir = f"http://contribuyente.seniat.gob.ve/rifconsulta/datosdirecciones.do{jsession_suffix}?consultar=S"
+            resp_dir = seniat_session.get(url_dir, headers={"Referer": ref_expediente}, timeout=12, verify=False)
             soup_dir = BeautifulSoup(resp_dir.text, "html.parser")
             
             for tr in soup_dir.find_all("tr"):
@@ -709,9 +709,8 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: 
                         val = sm.get_text(strip=True).replace("\u00a0", " ")
                         if lbl and val:
                             dir_info.append({"etiqueta": lbl, "valor": val.upper()})
-            print(f"[DEBUG] Direcciones encontradas: {len(dir_info)}")
         except Exception as e:
-            print(f"[ERROR] Excepción en direcciones: {e}")
+            logger.error(f"Excepción en direcciones: {e}")
 
         cargas_familiares = []
         relaciones_empresa = []
@@ -719,8 +718,8 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: 
         # 3. CARGAS FAMILIARES
         if tipo_consulta == "CEDULA":
             try:
-                resp_cf = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datoscargasfamiliares.do", headers={"Referer": ref_expediente}, timeout=12, verify=False)
-                print(f"[DEBUG] Cargas Familiares URL -> Status: {resp_cf.status_code}")
+                url_cf = f"http://contribuyente.seniat.gob.ve/rifconsulta/datoscargasfamiliares.do{jsession_suffix}"
+                resp_cf = seniat_session.get(url_cf, headers={"Referer": ref_expediente}, timeout=12, verify=False)
                 soup_cf = BeautifulSoup(resp_cf.text, "html.parser")
                 
                 carga_links = []
@@ -731,10 +730,8 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: 
                             href = "http://contribuyente.seniat.gob.ve/rifconsulta/" + href.lstrip("/")
                         carga_links.append((a.get_text(strip=True), href))
 
-                print(f"[DEBUG] Enlaces de cargas familiares encontrados: {len(carga_links)}")
-
                 for parentesco, link_detalle in carga_links:
-                    resp_det = seniat_session.get(link_detalle, headers={"Referer": "http://contribuyente.seniat.gob.ve/rifconsulta/datoscargasfamiliares.do"}, timeout=10, verify=False)
+                    resp_det = seniat_session.get(link_detalle, headers={"Referer": url_cf}, timeout=10, verify=False)
                     soup_det = BeautifulSoup(resp_det.text, "html.parser")
                     
                     nombres, cedula_c, f_nac, inf_med = "NO INDICA", "NO INDICA", "NO INDICA", "NO INDICA"
@@ -759,13 +756,13 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: 
                         "nro_informe_medico": inf_med
                     })
             except Exception as e:
-                print(f"[ERROR] Excepción en cargas familiares: {e}")
+                logger.error(f"Excepción en cargas familiares: {e}")
 
         # 4. RELACIONES / EMPRESAS
         if tipo_consulta == "RIF":
             try:
-                resp_rel = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosrelaciones.do", headers={"Referer": ref_expediente}, timeout=12, verify=False)
-                print(f"[DEBUG] Relaciones URL -> Status: {resp_rel.status_code}")
+                url_rel = f"http://contribuyente.seniat.gob.ve/rifconsulta/datosrelaciones.do{jsession_suffix}"
+                resp_rel = seniat_session.get(url_rel, headers={"Referer": ref_expediente}, timeout=12, verify=False)
                 soup_rel = BeautifulSoup(resp_rel.text, "html.parser")
                 
                 for tr in soup_rel.find_all("tr", class_=["letrasLista", "tablaFilas"]):
@@ -779,7 +776,7 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: 
                             "fecha": cols[3] if len(cols) > 3 else "NO INDICA"
                         })
             except Exception as e:
-                print(f"[ERROR] Excepción en relaciones: {e}")
+                logger.error(f"Excepción en relaciones: {e}")
 
         return {
             "dir_info": dir_info,
@@ -788,7 +785,7 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: 
             "relaciones_empresa": relaciones_empresa
         }
     except Exception as e:
-        print(f"[ERROR CRÍTICO] ejecutar_consulta_rif_sync: {e}")
+        logger.error(f"Error crítico en scraper: {e}")
         return None
 
 
@@ -803,19 +800,21 @@ async def ejecutar_consulta_rif(target_val: str, tipo_consulta: str, update: Upd
     ivss_estructurado, res_ivss = [], ""
     telefonos_registrados = []
     
-    if tipo_consulta == "CEDULA":
-        nombre_persona, rif_exacto, res_seniat_empresa, relaciones_publicas = await asyncio.to_thread(consultar_seniat_y_nombre, target_val)
-        ivss_estructurado, res_ivss = await asyncio.to_thread(consultar_ivss, target_val)
-        telefonos_registrados = await asyncio.to_thread(consultar_telefono_mysql, target_val)
+    target_val_limpio = re.sub(r"\D", "", target_val)
 
-    resultado_dict = await asyncio.to_thread(ejecutar_consulta_rif_sync, target_val, tipo_consulta, rif_exacto)
+    if tipo_consulta == "CEDULA":
+        nombre_persona, rif_exacto, res_seniat_empresa, relaciones_publicas = await asyncio.to_thread(consultar_seniat_y_nombre, target_val_limpio)
+        ivss_estructurado, res_ivss = await asyncio.to_thread(consultar_ivss, target_val_limpio)
+        telefonos_registrados = await asyncio.to_thread(consultar_telefono_mysql, target_val_limpio)
+
+    resultado_dict = await asyncio.to_thread(ejecutar_consulta_rif_sync, target_val_limpio, tipo_consulta, rif_exacto)
 
     if not resultado_dict:
         try:
             await update.get_bot().delete_message(chat_id=update.effective_chat.id, message_id=msg_espera.message_id)
         except Exception:
             pass
-        await update.message.reply_text(f"❌ No se encontró ningún registro para `{target_val}`.", parse_mode="Markdown")
+        await update.message.reply_text(f"❌ No se encontró ningún registro para `{target_val_limpio}`.", parse_mode="Markdown")
         return
 
     dir_info = resultado_dict["dir_info"]
@@ -825,7 +824,7 @@ async def ejecutar_consulta_rif(target_val: str, tipo_consulta: str, update: Upd
 
     edad_calculada = calcular_edad(datos_basicos['fecha_nacimiento'])
     nombre_final = nombre_persona if (nombre_persona and nombre_persona != "No especificado") else datos_basicos['nombre_razon']
-    cedula_rif_str = f"V-{target_val}" if tipo_consulta == "CEDULA" else target_val
+    cedula_rif_str = f"V-{target_val_limpio}" if tipo_consulta == "CEDULA" else target_val
 
     mensaje_final = f"📋 *RESULTADO SIVIC*\n"
     mensaje_final += f"─────---------─────\n"
@@ -906,7 +905,7 @@ async def ejecutar_consulta_rif(target_val: str, tipo_consulta: str, update: Upd
     await update.message.reply_text(mensaje_final, parse_mode="Markdown")
 
     try:
-        nom_archivo = target_val if tipo_consulta == "RIF" else f"V{target_val}"
+        nom_archivo = target_val_limpio if tipo_consulta == "CEDULA" else target_val
         archivo_pdf = await asyncio.to_thread(
             generar_documento_pdf,
             identificador=nom_archivo,
@@ -944,8 +943,10 @@ def verificar_o_iniciar_sesion_sync():
 
     if tiempo_transcurrido < SESSION_DURATION:
         try:
+            jsessionid = seniat_session.cookies.get("JSESSIONID")
+            jsession_suffix = f";jsessionid={jsessionid}" if jsessionid else ""
             test_resp = seniat_session.get(
-                "http://contribuyente.seniat.gob.ve/rifconsulta/datosbasicos.do",
+                f"http://contribuyente.seniat.gob.ve/rifconsulta/datosbasicos.do{jsession_suffix}",
                 timeout=10,
                 verify=False
             )
@@ -1191,7 +1192,7 @@ def main():
 
     app.add_handler(conv_handler)
 
-    print("🤖 Bot activo con Requests y BeautifulSoup en Termux (Android)...")
+    print("🤖 Bot activo con Requests e Inyección de JSESSIONID...")
     app.run_polling(bootstrap_retries=-1)
 
 

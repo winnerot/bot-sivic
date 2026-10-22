@@ -7,6 +7,7 @@ import re
 from datetime import datetime
 import requests
 from bs4 import BeautifulSoup
+from termux_playwright import async_playwright_termux as async_playwright
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -16,9 +17,6 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-from requests.adapters import HTTPAdapter
-from urllib3.util import Retry
-import urllib3
 
 # Librería para generar el PDF Profesional
 from reportlab.lib.pagesizes import letter
@@ -34,13 +32,11 @@ from reportlab.platypus import (
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER
 
-# Configuración de logging y urllib3
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+# Configuración de logging
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
-logging.getLogger("urllib3.connectionpool").setLevel(logging.ERROR)
 
 # Estados de la conversación
 ESPERANDO_CAPTCHA = 1
@@ -57,21 +53,12 @@ ADMIN_USER_ID = 2098655970
 USERS_FILE = "authorized_users.txt"
 LOGS_FILE = "consultas_logs.txt"
 
-SESSION_DURATION = 30 * 60  # 30 minutos en segundos
-_last_successful_login = 0
-
-# Sesión HTTP persistente
-seniat_session = requests.Session()
-seniat_session.headers.update({
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-    "Accept-Language": "es-ES,es;q=0.9,en;q=0.8"
-})
-
-retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504], allowed_methods=["GET", "POST"])
-adapter = HTTPAdapter(max_retries=retries)
-seniat_session.mount("http://", adapter)
-seniat_session.mount("https://", adapter)
+# Variables globales para control de navegador y sesión con Playwright
+pw_instance = None
+browser_instance = None
+browser_context = None
+_last_login_time = 0
+SESSION_MAX_AGE = 25 * 60  # 25 minutos
 
 consulta_lock = asyncio.Lock()
 
@@ -155,7 +142,7 @@ def consultar_telefono_mysql(cedula: str) -> list:
     telefonos = []
     try:
         url = f"http://victor159.serv00.net/consulta.php?cedula={cedula}"
-        response = requests.get(url, timeout=20, verify=False)
+        response = requests.get(url, timeout=15)
         if response.status_code == 200 and response.text.strip():
             telefonos = response.json()
     except Exception as e:
@@ -167,7 +154,7 @@ def consultar_inversa_mysql(telefono: str) -> list:
     coincidencias = []
     try:
         url = f"http://victor159.serv00.net/consulta.php?telefono={telefono}"
-        response = requests.get(url, timeout=20, verify=False)
+        response = requests.get(url, timeout=15)
         if response.status_code == 200 and response.text.strip():
             coincidencias = response.json()
     except Exception as e:
@@ -234,7 +221,7 @@ async def cmd_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ==============================================================================
-# CÁLCULO DE EDAD Y GENERADOR DE REPORTE PDF PROFESIONAL
+# CÁLCULO DE EDAD Y GENERADOR DE REPORTE PDF
 # ==============================================================================
 def calcular_edad(fecha_nacimiento_str: str) -> str:
     try:
@@ -490,12 +477,12 @@ def generar_documento_pdf(
 
 
 # ==============================================================================
-# CONSULTAS PÚBLICAS (SENIAT & IVSS)
+# CONSULTAS PÚBLICAS (SENIAT PÚBLICO e IVSS)
 # ==============================================================================
 def consultar_seniat_y_nombre(cedula: str):
     url = f"http://contribuyente.seniat.gob.ve/relacionesrif/inicioConsulta.do?personalidad=1&ci={cedula}"
     try:
-        response = seniat_session.get(url, timeout=12, verify=False)
+        response = requests.get(url, timeout=12)
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, "html.parser")
             texto_total = soup.get_text(separator=" ", strip=True)
@@ -547,7 +534,7 @@ def consultar_seniat_y_nombre(cedula: str):
         
         return "No especificado", "", "❌ *SENIAT:* Error de conexión.", []
     except Exception as e:
-        logger.error(f"Error SENIAT: {e}")
+        logger.error(f"Error SENIAT Público: {e}")
         return "No especificado", "", "❌ *SENIAT:* Error en petición.", []
 
 
@@ -562,9 +549,9 @@ def consultar_ivss(cedula: str):
     }
     try:
         session = requests.Session()
-        session.get(url_base, headers=headers, timeout=15, verify=False)
+        session.get(url_base, headers=headers, timeout=15)
         payload = {"Accion": "", "Accion1": "", "nacionalidad_aseg": "V", "cedula_aseg": cedula, "consultar": "Buscar"}
-        response = session.post(url_accion, data=payload, headers=headers, timeout=20, verify=False)
+        response = session.post(url_accion, data=payload, headers=headers, timeout=20)
 
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, "html.parser")
@@ -620,61 +607,100 @@ def consultar_ivss(cedula: str):
 
 
 # ==============================================================================
-# MOTOR HTTP SCRAPING DE EXPEDIENTE (CORREGIDO PARA MÚLTIPLES JSESSIONID)
+# MOTOR TERMUX-PLAYWRIGHT PARA SCRAPING DE EXPEDIENTE SENIAT
 # ==============================================================================
-def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: str = ""):
+async def inicializar_browser():
+    global pw_instance, browser_instance, browser_context
+    if not pw_instance:
+        pw_instance = await async_playwright().start()
+        browser_instance = await pw_instance.chromium.launch(
+            executable_path="/data/data/com.termux/files/usr/bin/chromium",
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+        )
+        browser_context = await browser_instance.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+
+
+async def verificar_o_iniciar_sesion_playwright():
+    global browser_context, _last_login_time
+    await inicializar_browser()
+
+    ahora = time.time()
+    if (ahora - _last_login_time) < SESSION_MAX_AGE:
+        page = await browser_context.new_page()
+        try:
+            await page.goto("http://contribuyente.seniat.gob.ve/rifconsulta/datosbasicos.do", timeout=8000)
+            if "login" not in page.url.lower():
+                await page.close()
+                return False, None
+        except Exception:
+            pass
+        await page.close()
+
+    page = await browser_context.new_page()
+    await page.goto("http://contribuyente.seniat.gob.ve/iseniatlogin/contribuyente.do", timeout=20000)
+    
+    captcha_element = await page.query_selector("img[src*='kapatch']")
+    if not captcha_element:
+        captcha_element = await page.query_selector("img[src*='Kapatch']")
+
+    captcha_bytes = b""
+    if captcha_element:
+        captcha_bytes = await captcha_element.screenshot()
+
+    await page.close()
+    return True, captcha_bytes
+
+
+async def login_con_captcha_playwright(codigo_captcha: str):
+    global browser_context, _last_login_time
+    page = await browser_context.new_page()
+    await page.goto("http://contribuyente.seniat.gob.ve/iseniatlogin/contribuyente.do", timeout=20000)
+
+    await page.fill("input[name='usuario']", SENIAT_USER)
+    await page.fill("input[name='clave']", SENIAT_PASS)
+    await page.fill("input[name='kaptcha']", codigo_captcha)
+
+    await page.click("input[name='buscar']")
+    await page.wait_for_load_state("networkidle")
+
+    contenido = (await page.content()).lower()
+    if "mensajeerror" in contenido or "incorrecto" in contenido or "inválido" in contenido:
+        await page.close()
+        return False, "Código Captcha incorrecto o credenciales rechazadas."
+
+    _last_login_time = time.time()
+    await page.close()
+    return True, ""
+
+
+async def ejecutar_consulta_rif_playwright(target_val: str, tipo_consulta: str, rif_exacto: str = ""):
+    global browser_context
     try:
+        page = await browser_context.new_page()
         url_inicio = "http://contribuyente.seniat.gob.ve/rifconsulta/login.do"
-        resp_ini = seniat_session.get(url_inicio, timeout=12, verify=False)
-
-        # Extracción segura de JSESSIONID manejando múltiples cookies
-        jsessionid = None
-        for cookie in seniat_session.cookies:
-            if cookie.name == "JSESSIONID":
-                if "/rifconsulta" in cookie.path or not jsessionid:
-                    jsessionid = cookie.value
-
-        jsession_suffix = f";jsessionid={jsessionid}" if jsessionid else ""
+        await page.goto(url_inicio, timeout=20000)
 
         cedula_limpia = re.sub(r"\D", "", target_val)
-        if tipo_consulta == "CEDULA":
-            rif_usar = f"V{cedula_limpia}"
-        else:
-            rif_usar = rif_exacto if rif_exacto else target_val.strip()
+        rif_usar = f"V{cedula_limpia}" if tipo_consulta == "CEDULA" else (rif_exacto if rif_exacto else target_val.strip())
 
-        payload = {
-            "rif": rif_usar,
-            "cedula": "",
-            "buscar": "Buscar"
-        }
+        await page.fill("input[name='rif']", rif_usar)
+        await page.click("input[name='buscar']")
+        await page.wait_for_load_state("networkidle")
 
-        url_post_busqueda = f"http://contribuyente.seniat.gob.ve/rifconsulta/login.do{jsession_suffix}"
-        resp_busqueda = seniat_session.post(url_post_busqueda, data=payload, headers={"Referer": url_inicio}, timeout=15, verify=False)
-
-        soup_b = BeautifulSoup(resp_busqueda.text, "html.parser")
-
-        url_expediente = None
-        for a in soup_b.find_all("a", href=True):
-            if "buscarexpediente.do" in a["href"] or "idContribuyente" in a["href"] or "rif=" in a["href"]:
-                url_expediente = a["href"]
-                if not url_expediente.startswith("http"):
-                    url_expediente = "http://contribuyente.seniat.gob.ve/rifconsulta/" + url_expediente.lstrip("/")
-                break
-
-        if url_expediente:
-            seniat_session.get(url_expediente, headers={"Referer": url_inicio}, timeout=12, verify=False)
-        else:
-            fallback_url = f"http://contribuyente.seniat.gob.ve/rifconsulta/buscarexpediente.do{jsession_suffix}?rif={rif_usar}"
-            seniat_session.get(fallback_url, headers={"Referer": url_inicio}, timeout=12, verify=False)
-
-        ref_expediente = url_expediente if url_expediente else f"http://contribuyente.seniat.gob.ve/rifconsulta/buscarexpediente.do{jsession_suffix}"
+        expediente_link = await page.query_selector("a[href*='buscarexpediente.do']")
+        if expediente_link:
+            await expediente_link.click()
+            await page.wait_for_load_state("networkidle")
 
         # 1. DATOS BÁSICOS
         datos_basicos = {"nombre_razon": "NO INDICA", "fecha_nacimiento": "NO INDICA", "correo": "NO INDICA"}
         try:
-            url_db = f"http://contribuyente.seniat.gob.ve/rifconsulta/datosbasicos.do{jsession_suffix}"
-            resp_db = seniat_session.get(url_db, headers={"Referer": ref_expediente}, timeout=12, verify=False)
-            soup_db = BeautifulSoup(resp_db.text, "html.parser")
+            await page.goto("http://contribuyente.seniat.gob.ve/rifconsulta/datosbasicos.do", timeout=15000)
+            content_db = await page.content()
+            soup_db = BeautifulSoup(content_db, "html.parser")
 
             for tr in soup_db.find_all("tr"):
                 texto_tr = tr.get_text(separator=" ", strip=True).upper()
@@ -696,15 +722,15 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: 
                         val = td.get_text(strip=True)
                         if "@" in val: datos_basicos["correo"] = val
         except Exception as e:
-            logger.error(f"Excepción en datos básicos: {e}")
+            logger.error(f"Error extrayendo datos básicos con Playwright: {e}")
 
         # 2. DIRECCIONES
         dir_info = []
         try:
-            url_dir = f"http://contribuyente.seniat.gob.ve/rifconsulta/datosdirecciones.do{jsession_suffix}?consultar=S"
-            resp_dir = seniat_session.get(url_dir, headers={"Referer": ref_expediente}, timeout=12, verify=False)
-            soup_dir = BeautifulSoup(resp_dir.text, "html.parser")
-            
+            await page.goto("http://contribuyente.seniat.gob.ve/rifconsulta/datosdirecciones.do?consultar=S", timeout=15000)
+            content_dir = await page.content()
+            soup_dir = BeautifulSoup(content_dir, "html.parser")
+
             for tr in soup_dir.find_all("tr"):
                 subts = tr.find_all(class_="tablaSubTitulo")
                 smalls = tr.find_all(class_="letrasSmall")
@@ -715,7 +741,7 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: 
                         if lbl and val:
                             dir_info.append({"etiqueta": lbl, "valor": val.upper()})
         except Exception as e:
-            logger.error(f"Excepción en direcciones: {e}")
+            logger.error(f"Error extrayendo direcciones con Playwright: {e}")
 
         cargas_familiares = []
         relaciones_empresa = []
@@ -723,10 +749,10 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: 
         # 3. CARGAS FAMILIARES
         if tipo_consulta == "CEDULA":
             try:
-                url_cf = f"http://contribuyente.seniat.gob.ve/rifconsulta/datoscargasfamiliares.do{jsession_suffix}"
-                resp_cf = seniat_session.get(url_cf, headers={"Referer": ref_expediente}, timeout=12, verify=False)
-                soup_cf = BeautifulSoup(resp_cf.text, "html.parser")
-                
+                await page.goto("http://contribuyente.seniat.gob.ve/rifconsulta/datoscargasfamiliares.do", timeout=15000)
+                content_cf = await page.content()
+                soup_cf = BeautifulSoup(content_cf, "html.parser")
+
                 carga_links = []
                 for a in soup_cf.find_all("a", href=True):
                     if "consultar=S&idCarga=" in a["href"]:
@@ -736,9 +762,10 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: 
                         carga_links.append((a.get_text(strip=True), href))
 
                 for parentesco, link_detalle in carga_links:
-                    resp_det = seniat_session.get(link_detalle, headers={"Referer": url_cf}, timeout=10, verify=False)
-                    soup_det = BeautifulSoup(resp_det.text, "html.parser")
-                    
+                    await page.goto(link_detalle, timeout=10000)
+                    content_det = await page.content()
+                    soup_det = BeautifulSoup(content_det, "html.parser")
+
                     nombres, cedula_c, f_nac, inf_med = "NO INDICA", "NO INDICA", "NO INDICA", "NO INDICA"
                     for row in soup_det.find_all("tr"):
                         cells = row.find_all("td")
@@ -761,15 +788,15 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: 
                         "nro_informe_medico": inf_med
                     })
             except Exception as e:
-                logger.error(f"Excepción en cargas familiares: {e}")
+                logger.error(f"Error extrayendo cargas familiares: {e}")
 
         # 4. RELACIONES / EMPRESAS
         if tipo_consulta == "RIF":
             try:
-                url_rel = f"http://contribuyente.seniat.gob.ve/rifconsulta/datosrelaciones.do{jsession_suffix}"
-                resp_rel = seniat_session.get(url_rel, headers={"Referer": ref_expediente}, timeout=12, verify=False)
-                soup_rel = BeautifulSoup(resp_rel.text, "html.parser")
-                
+                await page.goto("http://contribuyente.seniat.gob.ve/rifconsulta/datosrelaciones.do", timeout=15000)
+                content_rel = await page.content()
+                soup_rel = BeautifulSoup(content_rel, "html.parser")
+
                 for tr in soup_rel.find_all("tr", class_=["letrasLista", "tablaFilas"]):
                     tds = tr.find_all("td")
                     if len(tds) >= 2:
@@ -781,7 +808,9 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: 
                             "fecha": cols[3] if len(cols) > 3 else "NO INDICA"
                         })
             except Exception as e:
-                logger.error(f"Excepción en relaciones: {e}")
+                logger.error(f"Error extrayendo relaciones: {e}")
+
+        await page.close()
 
         return {
             "dir_info": dir_info,
@@ -790,7 +819,7 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: 
             "relaciones_empresa": relaciones_empresa
         }
     except Exception as e:
-        logger.error(f"Error crítico en scraper: {e}")
+        logger.error(f"Error crítico en Playwright: {e}")
         return None
 
 
@@ -812,7 +841,7 @@ async def ejecutar_consulta_rif(target_val: str, tipo_consulta: str, update: Upd
         ivss_estructurado, res_ivss = await asyncio.to_thread(consultar_ivss, target_val_limpio)
         telefonos_registrados = await asyncio.to_thread(consultar_telefono_mysql, target_val_limpio)
 
-    resultado_dict = await asyncio.to_thread(ejecutar_consulta_rif_sync, target_val_limpio, tipo_consulta, rif_exacto)
+    resultado_dict = await ejecutar_consulta_rif_playwright(target_val_limpio, tipo_consulta, rif_exacto)
 
     if not resultado_dict:
         try:
@@ -940,87 +969,6 @@ async def ejecutar_consulta_rif(target_val: str, tipo_consulta: str, update: Upd
 
 
 # ==============================================================================
-# MANEJADOR DE LOGIN Y CAPTCHA MEDIANTE REQUESTS (HTTP)
-# ==============================================================================
-def verificar_o_iniciar_sesion_sync():
-    global _last_successful_login
-    tiempo_transcurrido = time.time() - _last_successful_login
-
-    if tiempo_transcurrido < SESSION_DURATION:
-        try:
-            jsessionid = None
-            for cookie in seniat_session.cookies:
-                if cookie.name == "JSESSIONID":
-                    jsessionid = cookie.value
-                    break
-            jsession_suffix = f";jsessionid={jsessionid}" if jsessionid else ""
-
-            test_resp = seniat_session.get(
-                f"http://contribuyente.seniat.gob.ve/rifconsulta/datosbasicos.do{jsession_suffix}",
-                timeout=10,
-                verify=False
-            )
-            if test_resp.status_code == 200 and "login" not in test_resp.url.lower():
-                return False, None  # Sesión activa
-        except Exception:
-            pass
-
-    login_url = "http://contribuyente.seniat.gob.ve/iseniatlogin/contribuyente.do"
-    resp = seniat_session.get(login_url, timeout=15, verify=False)
-    soup = BeautifulSoup(resp.text, "html.parser")
-    
-    img_tag = soup.find("img", src=re.compile("kapatch", re.IGNORECASE))
-    if not img_tag:
-        for img in soup.find_all("img"):
-            if "kapatch" in img.get("src", "").lower():
-                img_tag = img
-                break
-
-    if img_tag:
-        src = img_tag.get("src")
-        if src.startswith("http"):
-            captcha_url = src
-        else:
-            captcha_url = "http://contribuyente.seniat.gob.ve/iseniatlogin/" + src.lstrip("/")
-        
-        headers_captcha = {"Referer": login_url}
-        cap_resp = seniat_session.get(captcha_url, headers=headers_captcha, timeout=10, verify=False)
-        return True, cap_resp.content
-
-    return True, b""
-
-
-def login_con_captcha_sync(codigo_captcha: str):
-    global _last_successful_login
-    login_action_url = "http://contribuyente.seniat.gob.ve/iseniatlogin/login.do"
-    referer_url = "http://contribuyente.seniat.gob.ve/iseniatlogin/contribuyente.do"
-    
-    payload = {
-        "usuario": SENIAT_USER,
-        "clave": SENIAT_PASS,
-        "kaptcha": codigo_captcha,
-        "buscar": "Aceptar"
-    }
-    
-    headers = {
-        "Referer": referer_url,
-        "Content-Type": "application/x-www-form-urlencoded"
-    }
-
-    resp_post = seniat_session.post(login_action_url, data=payload, headers=headers, timeout=20, verify=False)
-    resp_text = resp_post.text.lower()
-    
-    if "mensajeerror" in resp_text or "incorrecto" in resp_text or "inválido" in resp_text:
-        soup = BeautifulSoup(resp_post.text, "html.parser")
-        err_div = soup.find(id="mensajeError")
-        err_txt = err_div.get_text(strip=True) if err_div else "Código captcha incorrecto o datos no válidos"
-        return False, err_txt
-
-    _last_successful_login = time.time()
-    return True, ""
-
-
-# ==============================================================================
 # MANEJADOR DE MENSAJES TELEGRAM
 # ==============================================================================
 async def manejar_cedula_o_texto(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1089,11 +1037,11 @@ async def manejar_cedula_o_texto(update: Update, context: ContextTypes.DEFAULT_T
 
     registrar_log_consulta(user, parametro_busqueda, tipo_consulta)
 
-    msg_espera = await update.message.reply_text(f"🔄 Procesando consulta de {tipo_consulta} (`{parametro_busqueda}`)...", parse_mode="Markdown")
+    msg_espera = await update.message.reply_text(f"🔄 Procesando consulta con Playwright (`{parametro_busqueda}`)...", parse_mode="Markdown")
     
     async with consulta_lock:
         try:
-            necesita_login, captcha_bytes = await asyncio.to_thread(verificar_o_iniciar_sesion_sync)
+            necesita_login, captcha_bytes = await verificar_o_iniciar_sesion_playwright()
 
             if necesita_login:
                 context.user_data["pending_target"] = parametro_busqueda
@@ -1149,11 +1097,11 @@ async def recibir_captcha_y_consultar(update: Update, context: ContextTypes.DEFA
         await update.message.reply_text("⚠️ Sesión expirada. Envía la consulta nuevamente.")
         return ConversationHandler.END
 
-    msg_espera = await update.message.reply_text("🔄 Procesando consulta...")
+    msg_espera = await update.message.reply_text("🔄 Iniciando sesión en SENIAT vía Playwright...")
 
     async with consulta_lock:
         try:
-            exito, err_msg = await asyncio.to_thread(login_con_captcha_sync, codigo_usuario)
+            exito, err_msg = await login_con_captcha_playwright(codigo_usuario)
 
             if not exito:
                 try:
@@ -1202,7 +1150,7 @@ def main():
 
     app.add_handler(conv_handler)
 
-    print("🤖 Bot activo con Requests y manejo seguro de JSESSIONID en Termux...")
+    print("🤖 Bot activo con Termux-Playwright y Chromium...")
     app.run_polling(bootstrap_retries=-1)
 
 

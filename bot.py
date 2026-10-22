@@ -63,9 +63,9 @@ _last_successful_login = 0
 # Sesión HTTP persistente para interactuar con el SENIAT
 seniat_session = requests.Session()
 seniat_session.headers.update({
-    "User-Agent": "Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-    "Accept-Language": "es-ES,es;q=0.9"
+    "Accept-Language": "es-ES,es;q=0.9,en;q=0.8"
 })
 
 retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504], allowed_methods=["GET", "POST"])
@@ -639,25 +639,18 @@ def consultar_ivss(cedula: str):
 
 
 # ==============================================================================
-# FUNCIÓN CENTRAL DE EXTRACCIÓN CORREGIDA (SENIAT - REQUESTS & BS4)
+# FUNCIÓN CENTRAL DE EXTRACCIÓN DETALLADA (SENIAT - REQUESTS & BS4)
 # ==============================================================================
 def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str):
     try:
         url_inicio_consulta = "http://contribuyente.seniat.gob.ve/rifconsulta/login.do"
         seniat_session.get(url_inicio_consulta, timeout=12, verify=False)
 
-        if tipo_consulta == "RIF":
-            payload_busqueda = {
-                "rif": target_val,
-                "cedula": "",
-                "buscar": "Buscar"
-            }
-        else:
-            payload_busqueda = {
-                "rif": "",
-                "cedula": target_val,
-                "buscar": "Buscar"
-            }
+        payload_busqueda = {
+            "rif": target_val if tipo_consulta == "RIF" else "",
+            "cedula": target_val if tipo_consulta == "CEDULA" else "",
+            "buscar": "Buscar"
+        }
 
         headers_busqueda = {
             "Referer": url_inicio_consulta,
@@ -672,10 +665,10 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str):
             verify=False
         )
         
-        soup = BeautifulSoup(resp_busqueda.text, "html.parser")
+        soup_b = BeautifulSoup(resp_busqueda.text, "html.parser")
         
         exp_link = None
-        for a in soup.find_all("a", href=True):
+        for a in soup_b.find_all("a", href=True):
             if "buscarexpediente.do" in a["href"]:
                 exp_link = a["href"]
                 break
@@ -683,72 +676,75 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str):
         if exp_link:
             if not exp_link.startswith("http"):
                 exp_link = "http://contribuyente.seniat.gob.ve/rifconsulta/" + exp_link.lstrip("/")
-            seniat_session.get(exp_link, timeout=12, verify=False)
-        else:
-            resp_test = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosbasicos.do", timeout=10, verify=False)
-            if "nombre" not in resp_test.text.lower():
-                return None
+            seniat_session.get(exp_link, headers={"Referer": url_inicio_consulta}, timeout=12, verify=False)
 
-        dir_info = []
-        try:
-            resp_dir = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosdirecciones.do?consultar=S", timeout=12, verify=False)
-            soup_dir = BeautifulSoup(resp_dir.text, "html.parser")
-            
-            for tr in soup_dir.find_all("tr"):
-                subt = tr.find_all(class_="tablaSubTitulo")
-                small = tr.find_all(class_="letrasSmall")
-                if subt and small:
-                    for s_title, s_val in zip(subt, small):
-                        t_txt = s_title.get_text(strip=True).replace("\u00a0", " ")
-                        v_txt = s_val.get_text(strip=True).replace("\u00a0", " ")
-                        if t_txt:
-                            dir_info.append({"etiqueta": t_txt, "valor": v_txt.upper()})
-        except Exception as e:
-            logger.error(f"Error parseando direcciones: {e}")
+        ref_internal = "http://contribuyente.seniat.gob.ve/rifconsulta/buscarexpediente.do"
 
+        # 1. Extracción de Datos Básicos
         datos_basicos = {"nombre_razon": "NO INDICA", "fecha_nacimiento": "NO INDICA", "correo": "NO INDICA"}
         try:
-            resp_basicos = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosbasicos.do", timeout=12, verify=False)
+            resp_basicos = seniat_session.get(
+                "http://contribuyente.seniat.gob.ve/rifconsulta/datosbasicos.do",
+                headers={"Referer": ref_internal},
+                timeout=12,
+                verify=False
+            )
             soup_basicos = BeautifulSoup(resp_basicos.text, "html.parser")
             
-            for td in soup_basicos.find_all(["td", "th"]):
-                txt = td.get_text(strip=True).upper()
-                if "NOMBRE / RAZÓN SOCIAL" in txt or "NOMBRE" in txt:
-                    table = td.find_parent("table")
-                    if table:
-                        rows = table.find_all("tr")
-                        for r_idx, row in enumerate(rows):
-                            if td in row.find_all() and r_idx + 1 < len(rows):
-                                next_cells = rows[r_idx + 1].find_all("td")
-                                if next_cells:
-                                    val = next_cells[0].get_text(strip=True)
-                                    if val: datos_basicos["nombre_razon"] = val
-                if "FECHA DE NACIMIENTO" in txt or "CONSTITUCIÓN" in txt:
-                    table = td.find_parent("table")
-                    if table:
-                        rows = table.find_all("tr")
-                        for r_idx, row in enumerate(rows):
-                            if td in row.find_all() and r_idx + 1 < len(rows):
-                                next_cells = rows[r_idx + 1].find_all("td")
-                                if next_cells:
-                                    val = next_cells[0].get_text(strip=True)
-                                    if val: datos_basicos["fecha_nacimiento"] = val
-                if "CORREO" in txt:
-                    table = td.find_parent("table")
-                    if table:
-                        for cell in table.find_all("td"):
-                            val = cell.get_text(strip=True)
-                            if "@" in val:
-                                datos_basicos["correo"] = val
+            for tr in soup_basicos.find_all("tr"):
+                tds = tr.find_all("td")
+                for idx, td in enumerate(tds):
+                    txt = td.get_text(strip=True).upper()
+                    if ("NOMBRE" in txt or "RAZÓN SOCIAL" in txt) and idx + 1 < len(tds):
+                        val = tds[idx + 1].get_text(strip=True)
+                        if val and val != ":": datos_basicos["nombre_razon"] = val
+                    if ("FECHA DE NACIMIENTO" in txt or "CONSTITUCIÓN" in txt) and idx + 1 < len(tds):
+                        val = tds[idx + 1].get_text(strip=True)
+                        if val and val != ":": datos_basicos["fecha_nacimiento"] = val
+                    if "CORREO" in txt and idx + 1 < len(tds):
+                        val = tds[idx + 1].get_text(strip=True)
+                        if "@" in val: datos_basicos["correo"] = val
         except Exception as e:
             logger.error(f"Error parseando datos básicos: {e}")
+
+        # 2. Extracción de Domicilio Fiscal / Direcciones
+        dir_info = []
+        try:
+            resp_dir = seniat_session.get(
+                "http://contribuyente.seniat.gob.ve/rifconsulta/datosdirecciones.do?consultar=S",
+                headers={"Referer": ref_internal},
+                timeout=12,
+                verify=False
+            )
+            soup_dir = BeautifulSoup(resp_dir.text, "html.parser")
+            
+            tables = soup_dir.find_all("table")
+            for tbl in tables:
+                rows = tbl.find_all("tr")
+                for r in range(len(rows) - 1):
+                    subts = rows[r].find_all(class_="tablaSubTitulo")
+                    smalls = rows[r+1].find_all(class_="letrasSmall")
+                    if subts and smalls:
+                        for st, sm in zip(subts, smalls):
+                            lbl = st.get_text(strip=True).replace("\u00a0", " ")
+                            val = sm.get_text(strip=True).replace("\u00a0", " ")
+                            if lbl and val:
+                                dir_info.append({"etiqueta": lbl, "valor": val.upper()})
+        except Exception as e:
+            logger.error(f"Error parseando direcciones: {e}")
 
         cargas_familiares = []
         relaciones_empresa = []
 
+        # 3. Extracción de Cargas Familiares
         if tipo_consulta == "CEDULA":
             try:
-                resp_carga = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datoscargasfamiliares.do", timeout=12, verify=False)
+                resp_carga = seniat_session.get(
+                    "http://contribuyente.seniat.gob.ve/rifconsulta/datoscargasfamiliares.do",
+                    headers={"Referer": ref_internal},
+                    timeout=12,
+                    verify=False
+                )
                 soup_carga = BeautifulSoup(resp_carga.text, "html.parser")
                 
                 carga_links = []
@@ -760,7 +756,7 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str):
                         carga_links.append((a.get_text(strip=True), href))
 
                 for parentesco, link_detalle in carga_links:
-                    resp_det = seniat_session.get(link_detalle, timeout=10, verify=False)
+                    resp_det = seniat_session.get(link_detalle, headers={"Referer": "http://contribuyente.seniat.gob.ve/rifconsulta/datoscargasfamiliares.do"}, timeout=10, verify=False)
                     soup_det = BeautifulSoup(resp_det.text, "html.parser")
                     
                     nombres, cedula_c, f_nac, inf_med = "NO INDICA", "NO INDICA", "NO INDICA", "NO INDICA"
@@ -787,9 +783,15 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str):
             except Exception as e:
                 logger.error(f"Error parseando cargas familiares: {e}")
 
+        # 4. Extracción de Relaciones de Empresa
         if tipo_consulta == "RIF":
             try:
-                resp_rel = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosrelaciones.do", timeout=12, verify=False)
+                resp_rel = seniat_session.get(
+                    "http://contribuyente.seniat.gob.ve/rifconsulta/datosrelaciones.do",
+                    headers={"Referer": ref_internal},
+                    timeout=12,
+                    verify=False
+                )
                 soup_rel = BeautifulSoup(resp_rel.text, "html.parser")
                 
                 for tr in soup_rel.find_all("tr", class_=["letrasLista", "tablaFilas"]):

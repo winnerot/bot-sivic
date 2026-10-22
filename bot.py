@@ -10,7 +10,6 @@ from bs4 import BeautifulSoup
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 
 from telegram import Update
@@ -616,27 +615,18 @@ def inicializar_driver():
     global driver
     if not driver:
         options = Options()
-        options.add_argument("--headless")
+        options.add_argument("--headless=new")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--disable-gpu")
+        options.add_argument("--remote-debugging-port=0")
+        options.add_argument("--disable-software-rasterizer")
         
-        rutas_driver = [
-            "/usr/bin/chromedriver",
-            "/usr/lib/chromium-browser/chromedriver",
-            "/usr/lib/chromium/chromedriver"
-        ]
-        
-        service = None
-        for ruta in rutas_driver:
-            if os.path.exists(ruta):
-                service = Service(executable_path=ruta)
-                break
-                
-        if service:
-            driver = webdriver.Chrome(service=service, options=options)
-        else:
+        try:
             driver = webdriver.Chrome(options=options)
+        except Exception as e:
+            logger.error(f"Error crítico al iniciar Chrome/ChromeDriver: {e}")
+            raise e
 
 
 def verificar_o_iniciar_sesion_selenium():

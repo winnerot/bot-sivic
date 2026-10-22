@@ -7,7 +7,11 @@ import re
 from datetime import datetime
 import requests
 from bs4 import BeautifulSoup
-from termux_playwright import async_playwright_termux as async_playwright
+
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -53,10 +57,8 @@ ADMIN_USER_ID = 2098655970
 USERS_FILE = "authorized_users.txt"
 LOGS_FILE = "consultas_logs.txt"
 
-# Variables globales para control de navegador y sesión con Playwright
-pw_instance = None
-browser_instance = None
-browser_context = None
+# Variables globales para control del navegador Selenium
+driver = None
 _last_login_time = 0
 SESSION_MAX_AGE = 25 * 60  # 25 minutos
 
@@ -607,101 +609,92 @@ def consultar_ivss(cedula: str):
 
 
 # ==============================================================================
-# MOTOR TERMUX-PLAYWRIGHT CORREGIDO
+# MOTOR SELENIUM PARA EXPEDIENTE SENIAT
 # ==============================================================================
-async def inicializar_browser():
-    global pw_instance, browser_instance, browser_context
-    if not browser_instance:
-        pw_manager = async_playwright()
-        pw_instance = await pw_manager.__aenter__()
-        browser_instance = await pw_instance.chromium.launch(
-            executable_path="/data/data/com.termux/files/usr/bin/chromium",
-            headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
-        )
-        browser_context = await browser_instance.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        )
+def inicializar_driver():
+    global driver
+    if not driver:
+        options = Options()
+        options.add_argument("--headless")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--disable-gpu")
+        driver = webdriver.Chrome(options=options)
 
 
-async def verificar_o_iniciar_sesion_playwright():
-    global browser_context, _last_login_time
-    await inicializar_browser()
+def verificar_o_iniciar_sesion_selenium():
+    global driver, _last_login_time
+    inicializar_driver()
 
     ahora = time.time()
     if (ahora - _last_login_time) < SESSION_MAX_AGE:
-        page = await browser_context.new_page()
         try:
-            await page.goto("http://contribuyente.seniat.gob.ve/rifconsulta/datosbasicos.do", timeout=8000)
-            if "login" not in page.url.lower():
-                await page.close()
+            driver.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosbasicos.do")
+            time.sleep(2)
+            if "login" not in driver.current_url.lower():
                 return False, None
         except Exception:
             pass
-        await page.close()
 
-    page = await browser_context.new_page()
-    await page.goto("http://contribuyente.seniat.gob.ve/iseniatlogin/contribuyente.do", timeout=20000)
-    
-    captcha_element = await page.query_selector("img[src*='kapatch']")
-    if not captcha_element:
-        captcha_element = await page.query_selector("img[src*='Kapatch']")
-
-    captcha_bytes = b""
-    if captcha_element:
-        captcha_bytes = await captcha_element.screenshot()
-
-    await page.close()
-    return True, captcha_bytes
-
-
-async def login_con_captcha_playwright(codigo_captcha: str):
-    global browser_context, _last_login_time
-    page = await browser_context.new_page()
-    await page.goto("http://contribuyente.seniat.gob.ve/iseniatlogin/contribuyente.do", timeout=20000)
-
-    await page.fill("input[name='usuario']", SENIAT_USER)
-    await page.fill("input[name='clave']", SENIAT_PASS)
-    await page.fill("input[name='kaptcha']", codigo_captcha)
-
-    await page.click("input[name='buscar']")
-    await page.wait_for_load_state("networkidle")
-
-    contenido = (await page.content()).lower()
-    if "mensajeerror" in contenido or "incorrecto" in contenido or "inválido" in contenido:
-        await page.close()
-        return False, "Código Captcha incorrecto o credenciales rechazadas."
-
-    _last_login_time = time.time()
-    await page.close()
-    return True, ""
-
-
-async def ejecutar_consulta_rif_playwright(target_val: str, tipo_consulta: str, rif_exacto: str = ""):
-    global browser_context
+    driver.get("http://contribuyente.seniat.gob.ve/iseniatlogin/contribuyente.do")
+    time.sleep(2)
     try:
-        page = await browser_context.new_page()
-        url_inicio = "http://contribuyente.seniat.gob.ve/rifconsulta/login.do"
-        await page.goto(url_inicio, timeout=20000)
+        img_element = driver.find_element(By.XPATH, "//img[contains(@src, 'kapatch') or contains(@src, 'Kapatch')]")
+        captcha_bytes = img_element.screenshot_as_png
+        return True, captcha_bytes
+    except Exception:
+        return True, b""
+
+
+def login_con_captcha_selenium(codigo_captcha: str):
+    global driver, _last_login_time
+    try:
+        driver.get("http://contribuyente.seniat.gob.ve/iseniatlogin/contribuyente.do")
+        time.sleep(1)
+        driver.find_element(By.NAME, "usuario").send_keys(SENIAT_USER)
+        driver.find_element(By.NAME, "clave").send_keys(SENIAT_PASS)
+        driver.find_element(By.NAME, "kaptcha").send_keys(codigo_captcha)
+        driver.find_element(By.NAME, "buscar").click()
+        time.sleep(3)
+
+        contenido = driver.page_source.lower()
+        if "mensajeerror" in contenido or "incorrecto" in contenido or "inválido" in contenido:
+            return False, "Código Captcha incorrecto o credenciales rechazadas."
+
+        _last_login_time = time.time()
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
+
+def ejecutar_consulta_rif_selenium(target_val: str, tipo_consulta: str, rif_exacto: str = ""):
+    global driver
+    try:
+        driver.get("http://contribuyente.seniat.gob.ve/rifconsulta/login.do")
+        time.sleep(1)
 
         cedula_limpia = re.sub(r"\D", "", target_val)
         rif_usar = f"V{cedula_limpia}" if tipo_consulta == "CEDULA" else (rif_exacto if rif_exacto else target_val.strip())
 
-        await page.fill("input[name='rif']", rif_usar)
-        await page.click("input[name='buscar']")
-        await page.wait_for_load_state("networkidle")
+        rif_input = driver.find_element(By.NAME, "rif")
+        rif_input.clear()
+        rif_input.send_keys(rif_usar)
+        driver.find_element(By.NAME, "buscar").click()
+        time.sleep(2)
 
-        expediente_link = await page.query_selector("a[href*='buscarexpediente.do']")
-        if expediente_link:
-            await expediente_link.click()
-            await page.wait_for_load_state("networkidle")
+        try:
+            exp_link = driver.find_element(By.XPATH, "//a[contains(@href, 'buscarexpediente.do')]")
+            exp_link.click()
+            time.sleep(2)
+        except Exception:
+            pass
 
         # 1. DATOS BÁSICOS
         datos_basicos = {"nombre_razon": "NO INDICA", "fecha_nacimiento": "NO INDICA", "correo": "NO INDICA"}
         try:
-            await page.goto("http://contribuyente.seniat.gob.ve/rifconsulta/datosbasicos.do", timeout=15000)
-            content_db = await page.content()
-            soup_db = BeautifulSoup(content_db, "html.parser")
+            driver.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosbasicos.do")
+            time.sleep(1)
+            soup_db = BeautifulSoup(driver.page_source, "html.parser")
 
             for tr in soup_db.find_all("tr"):
                 texto_tr = tr.get_text(separator=" ", strip=True).upper()
@@ -723,14 +716,14 @@ async def ejecutar_consulta_rif_playwright(target_val: str, tipo_consulta: str, 
                         val = td.get_text(strip=True)
                         if "@" in val: datos_basicos["correo"] = val
         except Exception as e:
-            logger.error(f"Error extrayendo datos básicos con Playwright: {e}")
+            logger.error(f"Error extrayendo datos básicos: {e}")
 
         # 2. DIRECCIONES
         dir_info = []
         try:
-            await page.goto("http://contribuyente.seniat.gob.ve/rifconsulta/datosdirecciones.do?consultar=S", timeout=15000)
-            content_dir = await page.content()
-            soup_dir = BeautifulSoup(content_dir, "html.parser")
+            driver.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosdirecciones.do?consultar=S")
+            time.sleep(1)
+            soup_dir = BeautifulSoup(driver.page_source, "html.parser")
 
             for tr in soup_dir.find_all("tr"):
                 subts = tr.find_all(class_="tablaSubTitulo")
@@ -742,7 +735,7 @@ async def ejecutar_consulta_rif_playwright(target_val: str, tipo_consulta: str, 
                         if lbl and val:
                             dir_info.append({"etiqueta": lbl, "valor": val.upper()})
         except Exception as e:
-            logger.error(f"Error extrayendo direcciones con Playwright: {e}")
+            logger.error(f"Error extrayendo direcciones: {e}")
 
         cargas_familiares = []
         relaciones_empresa = []
@@ -750,9 +743,9 @@ async def ejecutar_consulta_rif_playwright(target_val: str, tipo_consulta: str, 
         # 3. CARGAS FAMILIARES
         if tipo_consulta == "CEDULA":
             try:
-                await page.goto("http://contribuyente.seniat.gob.ve/rifconsulta/datoscargasfamiliares.do", timeout=15000)
-                content_cf = await page.content()
-                soup_cf = BeautifulSoup(content_cf, "html.parser")
+                driver.get("http://contribuyente.seniat.gob.ve/rifconsulta/datoscargasfamiliares.do")
+                time.sleep(1)
+                soup_cf = BeautifulSoup(driver.page_source, "html.parser")
 
                 carga_links = []
                 for a in soup_cf.find_all("a", href=True):
@@ -763,9 +756,9 @@ async def ejecutar_consulta_rif_playwright(target_val: str, tipo_consulta: str, 
                         carga_links.append((a.get_text(strip=True), href))
 
                 for parentesco, link_detalle in carga_links:
-                    await page.goto(link_detalle, timeout=10000)
-                    content_det = await page.content()
-                    soup_det = BeautifulSoup(content_det, "html.parser")
+                    driver.get(link_detalle)
+                    time.sleep(1)
+                    soup_det = BeautifulSoup(driver.page_source, "html.parser")
 
                     nombres, cedula_c, f_nac, inf_med = "NO INDICA", "NO INDICA", "NO INDICA", "NO INDICA"
                     for row in soup_det.find_all("tr"):
@@ -776,7 +769,7 @@ async def ejecutar_consulta_rif_playwright(target_val: str, tipo_consulta: str, 
                                 val = row.find_next_sibling().find_all("td")[c_idx].get_text(strip=True)
                                 if "NOMBRES" in lbl and val and val != ":": nombres = val
                                 if ("CEDULA" in lbl or "C.I." in lbl) and val and val != ":": cedula_c = val
-                                if "FECHA DE NACIMIENTO" in lbl and val and val != ":": f_nac = val
+                                if "NACIMIENTO" in lbl and val and val != ":": f_nac = val
                                 if "INFORME MEDICO" in lbl and val and val != ":": inf_med = val
 
                     edad_c = calcular_edad(f_nac) if f_nac != "NO INDICA" else "No calculable"
@@ -794,9 +787,9 @@ async def ejecutar_consulta_rif_playwright(target_val: str, tipo_consulta: str, 
         # 4. RELACIONES / EMPRESAS
         if tipo_consulta == "RIF":
             try:
-                await page.goto("http://contribuyente.seniat.gob.ve/rifconsulta/datosrelaciones.do", timeout=15000)
-                content_rel = await page.content()
-                soup_rel = BeautifulSoup(content_rel, "html.parser")
+                driver.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosrelaciones.do")
+                time.sleep(1)
+                soup_rel = BeautifulSoup(driver.page_source, "html.parser")
 
                 for tr in soup_rel.find_all("tr", class_=["letrasLista", "tablaFilas"]):
                     tds = tr.find_all("td")
@@ -811,8 +804,6 @@ async def ejecutar_consulta_rif_playwright(target_val: str, tipo_consulta: str, 
             except Exception as e:
                 logger.error(f"Error extrayendo relaciones: {e}")
 
-        await page.close()
-
         return {
             "dir_info": dir_info,
             "datos_basicos": datos_basicos,
@@ -820,7 +811,7 @@ async def ejecutar_consulta_rif_playwright(target_val: str, tipo_consulta: str, 
             "relaciones_empresa": relaciones_empresa
         }
     except Exception as e:
-        logger.error(f"Error crítico en Playwright: {e}")
+        logger.error(f"Error crítico en Selenium scraper: {e}")
         return None
 
 
@@ -842,7 +833,7 @@ async def ejecutar_consulta_rif(target_val: str, tipo_consulta: str, update: Upd
         ivss_estructurado, res_ivss = await asyncio.to_thread(consultar_ivss, target_val_limpio)
         telefonos_registrados = await asyncio.to_thread(consultar_telefono_mysql, target_val_limpio)
 
-    resultado_dict = await ejecutar_consulta_rif_playwright(target_val_limpio, tipo_consulta, rif_exacto)
+    resultado_dict = await asyncio.to_thread(ejecutar_consulta_rif_selenium, target_val_limpio, tipo_consulta, rif_exacto)
 
     if not resultado_dict:
         try:
@@ -1038,11 +1029,11 @@ async def manejar_cedula_o_texto(update: Update, context: ContextTypes.DEFAULT_T
 
     registrar_log_consulta(user, parametro_busqueda, tipo_consulta)
 
-    msg_espera = await update.message.reply_text(f"🔄 Procesando consulta con Playwright (`{parametro_busqueda}`)...", parse_mode="Markdown")
+    msg_espera = await update.message.reply_text(f"🔄 Procesando consulta con Selenium (`{parametro_busqueda}`)...", parse_mode="Markdown")
     
     async with consulta_lock:
         try:
-            necesita_login, captcha_bytes = await verificar_o_iniciar_sesion_playwright()
+            necesita_login, captcha_bytes = await asyncio.to_thread(verificar_o_iniciar_sesion_selenium)
 
             if necesita_login:
                 context.user_data["pending_target"] = parametro_busqueda
@@ -1098,11 +1089,11 @@ async def recibir_captcha_y_consultar(update: Update, context: ContextTypes.DEFA
         await update.message.reply_text("⚠️ Sesión expirada. Envía la consulta nuevamente.")
         return ConversationHandler.END
 
-    msg_espera = await update.message.reply_text("🔄 Iniciando sesión en SENIAT vía Playwright...")
+    msg_espera = await update.message.reply_text("🔄 Iniciando sesión en SENIAT vía Selenium...")
 
     async with consulta_lock:
         try:
-            exito, err_msg = await login_con_captcha_playwright(codigo_usuario)
+            exito, err_msg = await asyncio.to_thread(login_con_captcha_selenium, codigo_usuario)
 
             if not exito:
                 try:
@@ -1151,7 +1142,7 @@ def main():
 
     app.add_handler(conv_handler)
 
-    print("🤖 Bot activo con Termux-Playwright...")
+    print("🤖 Bot activo con Selenium en Ubuntu PRoot...")
     app.run_polling(bootstrap_retries=-1)
 
 

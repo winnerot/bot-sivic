@@ -620,17 +620,16 @@ def consultar_ivss(cedula: str):
 
 
 # ==============================================================================
-# MOTOR HTTP COMPLETO DE SCRAPING DE EXPEDIENTE (SENIAT SECCIÓN AUTENTICADA)
+# MOTOR HTTP COMPLETO DE SCRAPING DE EXPEDIENTE (CON TRAZAS DEBUG)
 # ==============================================================================
 def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: str = ""):
     try:
-        # 1. Cargar la página inicial del módulo interno de RIF
         url_inicio = "http://contribuyente.seniat.gob.ve/rifconsulta/login.do"
-        seniat_session.get(url_inicio, timeout=12, verify=False)
+        resp_ini = seniat_session.get(url_inicio, timeout=12, verify=False)
+        print(f"[DEBUG] Acceso a login.do -> Status: {resp_ini.status_code}")
 
         rif_usar = rif_exacto if rif_exacto else (target_val if tipo_consulta == "RIF" else f"V{target_val}")
 
-        # 2. Formulario POST de búsqueda
         payload = {
             "rif": rif_usar,
             "cedula": "",
@@ -638,9 +637,10 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: 
         }
 
         resp_busqueda = seniat_session.post(url_inicio, data=payload, headers={"Referer": url_inicio}, timeout=15, verify=False)
+        print(f"[DEBUG] POST búsqueda RIF/Cédula ({rif_usar}) -> Status: {resp_busqueda.status_code}")
+
         soup_b = BeautifulSoup(resp_busqueda.text, "html.parser")
 
-        # 3. Extraer la URL del expediente exacto con parámetros JSESSIONID/Token
         url_expediente = None
         for a in soup_b.find_all("a", href=True):
             if "buscarexpediente.do" in a["href"]:
@@ -649,19 +649,22 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: 
                     url_expediente = "http://contribuyente.seniat.gob.ve/rifconsulta/" + url_expediente.lstrip("/")
                 break
 
+        print(f"[DEBUG] URL de expediente encontrada: {url_expediente}")
+
         if url_expediente:
-            # Visitamos el expediente para activar el estado del contribuyente en el servidor Java
-            seniat_session.get(url_expediente, headers={"Referer": url_inicio}, timeout=12, verify=False)
+            resp_exp = seniat_session.get(url_expediente, headers={"Referer": url_inicio}, timeout=12, verify=False)
+            print(f"[DEBUG] Visita a expediente -> Status: {resp_exp.status_code}")
 
         ref_expediente = url_expediente if url_expediente else "http://contribuyente.seniat.gob.ve/rifconsulta/buscarexpediente.do"
 
-        # 4. EXTRACCIÓN DE DATOS BÁSICOS
+        # 1. DATOS BÁSICOS
         datos_basicos = {"nombre_razon": "NO INDICA", "fecha_nacimiento": "NO INDICA", "correo": "NO INDICA"}
         try:
             resp_db = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosbasicos.do", headers={"Referer": ref_expediente}, timeout=12, verify=False)
+            print(f"[DEBUG] Datos Básicos URL -> Status: {resp_db.status_code}")
             soup_db = BeautifulSoup(resp_db.text, "html.parser")
-            
-            # Recorrido dinámico por etiquetas del DOM
+            print(f"[DEBUG] HTML Datos Básicos (primeros 300 caracteres): {resp_db.text[:300]}...")
+
             for tr in soup_db.find_all("tr"):
                 texto_tr = tr.get_text(separator=" ", strip=True).upper()
                 if "FECHA DE NACIMIENTO" in texto_tr or "CONSTITUCIÓN" in texto_tr:
@@ -682,12 +685,13 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: 
                         val = td.get_text(strip=True)
                         if "@" in val: datos_basicos["correo"] = val
         except Exception as e:
-            logger.error(f"Error scraping datos básicos: {e}")
+            print(f"[ERROR] Excepción en datos básicos: {e}")
 
-        # 5. EXTRACCIÓN DE DOMICILIO FISCAL / DIRECCIONES
+        # 2. DIRECCIONES
         dir_info = []
         try:
             resp_dir = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosdirecciones.do?consultar=S", headers={"Referer": ref_expediente}, timeout=12, verify=False)
+            print(f"[DEBUG] Direcciones URL -> Status: {resp_dir.status_code}")
             soup_dir = BeautifulSoup(resp_dir.text, "html.parser")
             
             for tr in soup_dir.find_all("tr"):
@@ -699,16 +703,18 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: 
                         val = sm.get_text(strip=True).replace("\u00a0", " ")
                         if lbl and val:
                             dir_info.append({"etiqueta": lbl, "valor": val.upper()})
+            print(f"[DEBUG] Direcciones encontradas: {len(dir_info)}")
         except Exception as e:
-            logger.error(f"Error scraping direcciones: {e}")
+            print(f"[ERROR] Excepción en direcciones: {e}")
 
         cargas_familiares = []
         relaciones_empresa = []
 
-        # 6. EXTRACCIÓN DE CARGAS FAMILIARES
+        # 3. CARGAS FAMILIARES
         if tipo_consulta == "CEDULA":
             try:
                 resp_cf = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datoscargasfamiliares.do", headers={"Referer": ref_expediente}, timeout=12, verify=False)
+                print(f"[DEBUG] Cargas Familiares URL -> Status: {resp_cf.status_code}")
                 soup_cf = BeautifulSoup(resp_cf.text, "html.parser")
                 
                 carga_links = []
@@ -718,6 +724,8 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: 
                         if not href.startswith("http"):
                             href = "http://contribuyente.seniat.gob.ve/rifconsulta/" + href.lstrip("/")
                         carga_links.append((a.get_text(strip=True), href))
+
+                print(f"[DEBUG] Enlaces de cargas familiares encontrados: {len(carga_links)}")
 
                 for parentesco, link_detalle in carga_links:
                     resp_det = seniat_session.get(link_detalle, headers={"Referer": "http://contribuyente.seniat.gob.ve/rifconsulta/datoscargasfamiliares.do"}, timeout=10, verify=False)
@@ -745,12 +753,13 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: 
                         "nro_informe_medico": inf_med
                     })
             except Exception as e:
-                logger.error(f"Error scraping cargas familiares: {e}")
+                print(f"[ERROR] Excepción en cargas familiares: {e}")
 
-        # 7. EXTRACCIÓN DE RELACIONES / EMPRESAS
+        # 4. RELACIONES / EMPRESAS
         if tipo_consulta == "RIF":
             try:
                 resp_rel = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosrelaciones.do", headers={"Referer": ref_expediente}, timeout=12, verify=False)
+                print(f"[DEBUG] Relaciones URL -> Status: {resp_rel.status_code}")
                 soup_rel = BeautifulSoup(resp_rel.text, "html.parser")
                 
                 for tr in soup_rel.find_all("tr", class_=["letrasLista", "tablaFilas"]):
@@ -764,7 +773,7 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: 
                             "fecha": cols[3] if len(cols) > 3 else "NO INDICA"
                         })
             except Exception as e:
-                logger.error(f"Error scraping relaciones: {e}")
+                print(f"[ERROR] Excepción en relaciones: {e}")
 
         return {
             "dir_info": dir_info,
@@ -773,7 +782,7 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: 
             "relaciones_empresa": relaciones_empresa
         }
     except Exception as e:
-        logger.error(f"Error general en scraper: {e}")
+        print(f"[ERROR CRÍTICO] ejecutar_consulta_rif_sync: {e}")
         return None
 
 

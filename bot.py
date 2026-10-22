@@ -610,7 +610,7 @@ def consultar_ivss(cedula: str):
 
 
 # ==============================================================================
-# MOTOR SELENIUM FORZADO A RUTA LOCAL (UBUNTU PROOT)
+# MOTOR SELENIUM (INICIALIZACIÓN ROBUSTA)
 # ==============================================================================
 def inicializar_driver():
     global driver
@@ -622,8 +622,9 @@ def inicializar_driver():
         options.add_argument("--disable-gpu")
         options.add_argument("--remote-debugging-port=0")
         options.add_argument("--disable-software-rasterizer")
+        options.add_argument("--disable-extensions")
+        options.add_argument("--disable-infobars")
         
-        # Rutas absolutas del chromedriver instalado vía apt en Ubuntu PRoot
         rutas_driver = [
             "/usr/bin/chromedriver",
             "/usr/lib/chromium-browser/chromedriver",
@@ -648,7 +649,11 @@ def inicializar_driver():
 
 def verificar_o_iniciar_sesion_selenium():
     global driver, _last_login_time
-    inicializar_driver()
+    try:
+        inicializar_driver()
+    except Exception as e:
+        logger.error(f"Fallo al inicializar driver en verificación: {e}")
+        return True, b""
 
     ahora = time.time()
     if (ahora - _last_login_time) < SESSION_MAX_AGE:
@@ -660,9 +665,9 @@ def verificar_o_iniciar_sesion_selenium():
         except Exception:
             pass
 
-    driver.get("http://contribuyente.seniat.gob.ve/iseniatlogin/contribuyente.do")
-    time.sleep(2)
     try:
+        driver.get("http://contribuyente.seniat.gob.ve/iseniatlogin/contribuyente.do")
+        time.sleep(2)
         img_element = driver.find_element(By.XPATH, "//img[contains(@src, 'kapatch') or contains(@src, 'Kapatch')]")
         captcha_bytes = img_element.screenshot_as_png
         return True, captcha_bytes

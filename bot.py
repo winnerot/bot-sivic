@@ -620,15 +620,20 @@ def consultar_ivss(cedula: str):
 
 
 # ==============================================================================
-# MOTOR HTTP SCRAPING DE EXPEDIENTE (INYECTANDO JSESSIONID EN URLS)
+# MOTOR HTTP SCRAPING DE EXPEDIENTE (CORREGIDO PARA MÚLTIPLES JSESSIONID)
 # ==============================================================================
 def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: str = ""):
     try:
         url_inicio = "http://contribuyente.seniat.gob.ve/rifconsulta/login.do"
         resp_ini = seniat_session.get(url_inicio, timeout=12, verify=False)
 
-        # Extraer el JSESSIONID activo de las cookies
-        jsessionid = seniat_session.cookies.get("JSESSIONID")
+        # Extracción segura de JSESSIONID manejando múltiples cookies
+        jsessionid = None
+        for cookie in seniat_session.cookies:
+            if cookie.name == "JSESSIONID":
+                if "/rifconsulta" in cookie.path or not jsessionid:
+                    jsessionid = cookie.value
+
         jsession_suffix = f";jsessionid={jsessionid}" if jsessionid else ""
 
         cedula_limpia = re.sub(r"\D", "", target_val)
@@ -943,8 +948,13 @@ def verificar_o_iniciar_sesion_sync():
 
     if tiempo_transcurrido < SESSION_DURATION:
         try:
-            jsessionid = seniat_session.cookies.get("JSESSIONID")
+            jsessionid = None
+            for cookie in seniat_session.cookies:
+                if cookie.name == "JSESSIONID":
+                    jsessionid = cookie.value
+                    break
             jsession_suffix = f";jsessionid={jsessionid}" if jsessionid else ""
+
             test_resp = seniat_session.get(
                 f"http://contribuyente.seniat.gob.ve/rifconsulta/datosbasicos.do{jsession_suffix}",
                 timeout=10,
@@ -1192,7 +1202,7 @@ def main():
 
     app.add_handler(conv_handler)
 
-    print("🤖 Bot activo con Requests e Inyección de JSESSIONID...")
+    print("🤖 Bot activo con Requests y manejo seguro de JSESSIONID en Termux...")
     app.run_polling(bootstrap_retries=-1)
 
 

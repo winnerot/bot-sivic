@@ -32,7 +32,7 @@ from reportlab.platypus import (
     HRFlowable,
 )
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.lib.enums import TA_CENTER
 
 # Configuración de logging y urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -51,7 +51,7 @@ SENIAT_USER = "v9684209"
 SENIAT_PASS = "v9684209"
 
 # CONFIGURACIÓN DE ADMINISTRADOR Y ACCESO
-ADMIN_USER_ID = 2098655970  # <--- ID DE ADMINISTRADOR PRINCIPAL
+ADMIN_USER_ID = 2098655970
 
 # Archivos de persistencia
 USERS_FILE = "authorized_users.txt"
@@ -60,7 +60,7 @@ LOGS_FILE = "consultas_logs.txt"
 SESSION_DURATION = 30 * 60  # 30 minutos en segundos
 _last_successful_login = 0
 
-# Sesión HTTP persistente para interactuar con el SENIAT
+# Sesión HTTP persistente
 seniat_session = requests.Session()
 seniat_session.headers.update({
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -279,38 +279,16 @@ def generar_documento_pdf(
     styles = getSampleStyleSheet()
 
     title_style = ParagraphStyle(
-        'DocTitle',
-        parent=styles['Heading1'],
-        fontName='Helvetica-Bold',
-        fontSize=15,
-        leading=18,
-        textColor=colors.HexColor('#1E3A8A'),
-        alignment=TA_CENTER
+        'DocTitle', parent=styles['Heading1'], fontName='Helvetica-Bold', fontSize=15, leading=18, textColor=colors.HexColor('#1E3A8A'), alignment=TA_CENTER
     )
     subtitle_style = ParagraphStyle(
-        'DocSubTitle',
-        parent=styles['Normal'],
-        fontName='Helvetica-Bold',
-        fontSize=9,
-        leading=11,
-        textColor=colors.HexColor('#475569'),
-        alignment=TA_CENTER
+        'DocSubTitle', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=9, leading=11, textColor=colors.HexColor('#475569'), alignment=TA_CENTER
     )
     label_style = ParagraphStyle(
-        'LabelStyle',
-        parent=styles['Normal'],
-        fontName='Helvetica-Bold',
-        fontSize=8,
-        leading=10,
-        textColor=colors.HexColor('#334155')
+        'LabelStyle', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=8, leading=10, textColor=colors.HexColor('#334155')
     )
     value_style = ParagraphStyle(
-        'ValueStyle',
-        parent=styles['Normal'],
-        fontName='Helvetica',
-        fontSize=8,
-        leading=10,
-        textColor=colors.HexColor('#0F172A')
+        'ValueStyle', parent=styles['Normal'], fontName='Helvetica', fontSize=8, leading=10, textColor=colors.HexColor('#0F172A')
     )
 
     story.append(Paragraph("Sistema Integrado de Verificación de Información Ciudadana (SIVIC)", title_style))
@@ -512,7 +490,7 @@ def generar_documento_pdf(
 
 
 # ==============================================================================
-# CONSULTAS PÚBLICAS (SENIAT & IVSS MEDIANTE REQUESTS)
+# CONSULTAS PÚBLICAS (SENIAT & IVSS)
 # ==============================================================================
 def consultar_seniat_y_nombre(cedula: str):
     url = f"http://contribuyente.seniat.gob.ve/relacionesrif/inicioConsulta.do?personalidad=1&ci={cedula}"
@@ -522,8 +500,8 @@ def consultar_seniat_y_nombre(cedula: str):
             soup = BeautifulSoup(response.text, "html.parser")
             texto_total = soup.get_text(separator=" ", strip=True)
 
-            if any(kw in texto_total.lower() for kw in ["no existe", "no se encuentra", "error", "invalida"]):
-                return "No especificado", "", "❌ *SENIAT (EMPRESA):* La cédula no se encuentra registrada.", []
+            if any(kw in texto_total.lower() for kw in ["no existe", "no se encuentra", "error"]):
+                return "No especificado", "", "❌ *SENIAT:* La cédula no se encuentra registrada.", []
 
             nombre_persona = "No especificado"
             rif_encontrado = ""
@@ -567,22 +545,20 @@ def consultar_seniat_y_nombre(cedula: str):
             
             return nombre_persona, rif_encontrado, resultado_empresas.strip(), relaciones
         
-        return "No especificado", "", "❌ *SENIAT (EMPRESA):* Error de conexión.", []
+        return "No especificado", "", "❌ *SENIAT:* Error de conexión.", []
     except Exception as e:
         logger.error(f"Error SENIAT: {e}")
-        return "No especificado", "", "❌ *SENIAT (EMPRESA):* Error en la petición HTTP.", []
+        return "No especificado", "", "❌ *SENIAT:* Error en petición.", []
 
 
 def consultar_ivss(cedula: str):
     url_base = "http://www.ivss.gob.ve:28083/CuentaIndividualIntranet/"
     url_accion = "http://www.ivss.gob.ve:28083/CuentaIndividualIntranet/CtaIndividualCTRL"
-    
     headers = {
         "User-Agent": "Mozilla/5.0",
         "Referer": url_base,
         "Origin": "http://www.ivss.gob.ve:28083/CuentaIndividualIntranet/",
         "Content-Type": "application/x-www-form-urlencoded",
-        "Connection": "close",
     }
     try:
         session = requests.Session()
@@ -644,15 +620,17 @@ def consultar_ivss(cedula: str):
 
 
 # ==============================================================================
-# SCRAPER DEL EXPEDIENTE PRIVADO SENIAT (DATOS BÁSICOS, DIRECCIONES Y CARGAS)
+# MOTOR HTTP COMPLETO DE SCRAPING DE EXPEDIENTE (SENIAT SECCIÓN AUTENTICADA)
 # ==============================================================================
 def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: str = ""):
     try:
+        # 1. Cargar la página inicial del módulo interno de RIF
         url_inicio = "http://contribuyente.seniat.gob.ve/rifconsulta/login.do"
         seniat_session.get(url_inicio, timeout=12, verify=False)
 
         rif_usar = rif_exacto if rif_exacto else (target_val if tipo_consulta == "RIF" else f"V{target_val}")
 
+        # 2. Formulario POST de búsqueda
         payload = {
             "rif": rif_usar,
             "cedula": "",
@@ -661,87 +639,76 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: 
 
         resp_busqueda = seniat_session.post(url_inicio, data=payload, headers={"Referer": url_inicio}, timeout=15, verify=False)
         soup_b = BeautifulSoup(resp_busqueda.text, "html.parser")
-        
-        # Rastrreo automático de enlaces del expediente en el DOM del SENIAT
-        urls_menu = {
-            "datos_basicos": "datosbasicos.do",
-            "direcciones": "datosdirecciones.do",
-            "cargas": "datoscargasfamiliares.do",
-            "relaciones": "datosrelaciones.do"
-        }
-        
-        enlaces_encontrados = {}
-        for a in soup_b.find_all("a", href=True):
-            href = a["href"]
-            for key, val in urls_menu.items():
-                if val in href:
-                    if not href.startswith("http"):
-                        href = "http://contribuyente.seniat.gob.ve/rifconsulta/" + href.lstrip("/")
-                    enlaces_encontrados[key] = href
 
-        # Si hay enlace de expediente general, lo visitamos para asentar las cookies de sesión
+        # 3. Extraer la URL del expediente exacto con parámetros JSESSIONID/Token
+        url_expediente = None
         for a in soup_b.find_all("a", href=True):
             if "buscarexpediente.do" in a["href"]:
-                exp_link = a["href"]
-                if not exp_link.startswith("http"):
-                    exp_link = "http://contribuyente.seniat.gob.ve/rifconsulta/" + exp_link.lstrip("/")
-                seniat_session.get(exp_link, headers={"Referer": url_inicio}, timeout=10, verify=False)
+                url_expediente = a["href"]
+                if not url_expediente.startswith("http"):
+                    url_expediente = "http://contribuyente.seniat.gob.ve/rifconsulta/" + url_expediente.lstrip("/")
                 break
 
-        ref_internal = "http://contribuyente.seniat.gob.ve/rifconsulta/buscarexpediente.do"
+        if url_expediente:
+            # Visitamos el expediente para activar el estado del contribuyente en el servidor Java
+            seniat_session.get(url_expediente, headers={"Referer": url_inicio}, timeout=12, verify=False)
 
-        # 1. SCRAPING DE DATOS BÁSICOS
+        ref_expediente = url_expediente if url_expediente else "http://contribuyente.seniat.gob.ve/rifconsulta/buscarexpediente.do"
+
+        # 4. EXTRACCIÓN DE DATOS BÁSICOS
         datos_basicos = {"nombre_razon": "NO INDICA", "fecha_nacimiento": "NO INDICA", "correo": "NO INDICA"}
-        url_db = enlaces_encontrados.get("datos_basicos", "http://contribuyente.seniat.gob.ve/rifconsulta/datosbasicos.do")
         try:
-            resp_db = seniat_session.get(url_db, headers={"Referer": ref_internal}, timeout=12, verify=False)
+            resp_db = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosbasicos.do", headers={"Referer": ref_expediente}, timeout=12, verify=False)
             soup_db = BeautifulSoup(resp_db.text, "html.parser")
             
+            # Recorrido dinámico por etiquetas del DOM
             for tr in soup_db.find_all("tr"):
-                tds = tr.find_all(["td", "th"])
-                for idx, td in enumerate(tds):
-                    txt = td.get_text(strip=True).upper()
-                    if ("NOMBRE" in txt or "RAZÓN SOCIAL" in txt) and idx + 1 < len(tds):
-                        val = tds[idx + 1].get_text(strip=True)
-                        if val and val != ":": datos_basicos["nombre_razon"] = val
-                    if ("FECHA DE NACIMIENTO" in txt or "CONSTITUCIÓN" in txt) and idx + 1 < len(tds):
-                        val = tds[idx + 1].get_text(strip=True)
-                        if val and val != ":": datos_basicos["fecha_nacimiento"] = val
-                    if "CORREO" in txt and idx + 1 < len(tds):
-                        val = tds[idx + 1].get_text(strip=True)
+                texto_tr = tr.get_text(separator=" ", strip=True).upper()
+                if "FECHA DE NACIMIENTO" in texto_tr or "CONSTITUCIÓN" in texto_tr:
+                    tds = tr.find_all(["td", "th"])
+                    for idx, td in enumerate(tds):
+                        if "FECHA" in td.get_text(strip=True).upper() and idx + 1 < len(tds):
+                            val = tds[idx + 1].get_text(strip=True)
+                            if val and val != ":": datos_basicos["fecha_nacimiento"] = val
+                if "NOMBRE" in texto_tr or "RAZÓN SOCIAL" in texto_tr:
+                    tds = tr.find_all(["td", "th"])
+                    for idx, td in enumerate(tds):
+                        if "NOMBRE" in td.get_text(strip=True).upper() and idx + 1 < len(tds):
+                            val = tds[idx + 1].get_text(strip=True)
+                            if val and val != ":": datos_basicos["nombre_razon"] = val
+                if "CORREO" in texto_tr:
+                    tds = tr.find_all(["td", "th"])
+                    for idx, td in enumerate(tds):
+                        val = td.get_text(strip=True)
                         if "@" in val: datos_basicos["correo"] = val
         except Exception as e:
             logger.error(f"Error scraping datos básicos: {e}")
 
-        # 2. SCRAPING DE DOMICILIO FISCAL / DIRECCIONES
+        # 5. EXTRACCIÓN DE DOMICILIO FISCAL / DIRECCIONES
         dir_info = []
-        url_dir = enlaces_encontrados.get("direcciones", "http://contribuyente.seniat.gob.ve/rifconsulta/datosdirecciones.do?consultar=S")
         try:
-            resp_dir = seniat_session.get(url_dir, headers={"Referer": ref_internal}, timeout=12, verify=False)
+            resp_dir = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosdirecciones.do?consultar=S", headers={"Referer": ref_expediente}, timeout=12, verify=False)
             soup_dir = BeautifulSoup(resp_dir.text, "html.parser")
             
-            for tbl in soup_dir.find_all("table"):
-                rows = tbl.find_all("tr")
-                for r in range(len(rows) - 1):
-                    subts = rows[r].find_all(class_="tablaSubTitulo")
-                    smalls = rows[r+1].find_all(class_="letrasSmall")
-                    if subts and smalls:
-                        for st, sm in zip(subts, smalls):
-                            lbl = st.get_text(strip=True).replace("\u00a0", " ")
-                            val = sm.get_text(strip=True).replace("\u00a0", " ")
-                            if lbl and val:
-                                dir_info.append({"etiqueta": lbl, "valor": val.upper()})
+            for tr in soup_dir.find_all("tr"):
+                subts = tr.find_all(class_="tablaSubTitulo")
+                smalls = tr.find_all(class_="letrasSmall")
+                if subts and smalls:
+                    for st, sm in zip(subts, smalls):
+                        lbl = st.get_text(strip=True).replace("\u00a0", " ")
+                        val = sm.get_text(strip=True).replace("\u00a0", " ")
+                        if lbl and val:
+                            dir_info.append({"etiqueta": lbl, "valor": val.upper()})
         except Exception as e:
             logger.error(f"Error scraping direcciones: {e}")
 
         cargas_familiares = []
         relaciones_empresa = []
 
-        # 3. SCRAPING DE CARGAS FAMILIARES
+        # 6. EXTRACCIÓN DE CARGAS FAMILIARES
         if tipo_consulta == "CEDULA":
-            url_cf = enlaces_encontrados.get("cargas", "http://contribuyente.seniat.gob.ve/rifconsulta/datoscargasfamiliares.do")
             try:
-                resp_cf = seniat_session.get(url_cf, headers={"Referer": ref_internal}, timeout=12, verify=False)
+                resp_cf = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datoscargasfamiliares.do", headers={"Referer": ref_expediente}, timeout=12, verify=False)
                 soup_cf = BeautifulSoup(resp_cf.text, "html.parser")
                 
                 carga_links = []
@@ -753,7 +720,7 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: 
                         carga_links.append((a.get_text(strip=True), href))
 
                 for parentesco, link_detalle in carga_links:
-                    resp_det = seniat_session.get(link_detalle, headers={"Referer": url_cf}, timeout=10, verify=False)
+                    resp_det = seniat_session.get(link_detalle, headers={"Referer": "http://contribuyente.seniat.gob.ve/rifconsulta/datoscargasfamiliares.do"}, timeout=10, verify=False)
                     soup_det = BeautifulSoup(resp_det.text, "html.parser")
                     
                     nombres, cedula_c, f_nac, inf_med = "NO INDICA", "NO INDICA", "NO INDICA", "NO INDICA"
@@ -780,11 +747,10 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: 
             except Exception as e:
                 logger.error(f"Error scraping cargas familiares: {e}")
 
-        # 4. SCRAPING DE RELACIONES / EMPRESAS
+        # 7. EXTRACCIÓN DE RELACIONES / EMPRESAS
         if tipo_consulta == "RIF":
-            url_rel = enlaces_encontrados.get("relaciones", "http://contribuyente.seniat.gob.ve/rifconsulta/datosrelaciones.do")
             try:
-                resp_rel = seniat_session.get(url_rel, headers={"Referer": ref_internal}, timeout=12, verify=False)
+                resp_rel = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosrelaciones.do", headers={"Referer": ref_expediente}, timeout=12, verify=False)
                 soup_rel = BeautifulSoup(resp_rel.text, "html.parser")
                 
                 for tr in soup_rel.find_all("tr", class_=["letrasLista", "tablaFilas"]):
@@ -807,10 +773,13 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: 
             "relaciones_empresa": relaciones_empresa
         }
     except Exception as e:
-        logger.error(f"Error en scraper SENIAT: {e}")
+        logger.error(f"Error general en scraper: {e}")
         return None
 
 
+# ==============================================================================
+# EJECUCIÓN DE CONSULTA Y RESPUESTA
+# ==============================================================================
 async def ejecutar_consulta_rif(target_val: str, tipo_consulta: str, update: Update, msg_espera):
     user_actual = update.effective_user
     await notificar_admin_consulta(update.get_bot(), user_actual, target_val, tipo_consulta)

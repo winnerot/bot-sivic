@@ -607,12 +607,13 @@ def consultar_ivss(cedula: str):
 
 
 # ==============================================================================
-# MOTOR TERMUX-PLAYWRIGHT PARA SCRAPING DE EXPEDIENTE SENIAT
+# MOTOR TERMUX-PLAYWRIGHT CORREGIDO
 # ==============================================================================
 async def inicializar_browser():
     global pw_instance, browser_instance, browser_context
-    if not pw_instance:
-        pw_instance = await async_playwright().start()
+    if not browser_instance:
+        pw_manager = async_playwright()
+        pw_instance = await pw_manager.__aenter__()
         browser_instance = await pw_instance.chromium.launch(
             executable_path="/data/data/com.termux/files/usr/bin/chromium",
             headless=True,
@@ -1150,7 +1151,7 @@ def main():
 
     app.add_handler(conv_handler)
 
-    print("🤖 Bot activo con Termux-Playwright y Chromium...")
+    print("🤖 Bot activo con Termux-Playwright...")
     app.run_polling(bootstrap_retries=-1)
 
 

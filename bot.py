@@ -7,7 +7,6 @@ import re
 from datetime import datetime
 import requests
 from bs4 import BeautifulSoup
-
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -17,6 +16,9 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
+import urllib3
 
 # Librería para generar el PDF Profesional
 from reportlab.lib.pagesizes import letter
@@ -32,17 +34,19 @@ from reportlab.platypus import (
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER
 
-# Configuración de logging
+# Configuración de logging y urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+logging.getLogger("urllib3.connectionpool").setLevel(logging.ERROR)
 
 # Estados de la conversación
 ESPERANDO_CAPTCHA = 1
 
 # Constantes SENIAT & Telegram
-TELEGRAM_TOKEN = "8648857231:AAFGoIk7Vslkj7Av8aaLHLJqzSQka0qN6Lo"
+TELEGRAM_BOT_TOKEN = "8648857231:AAFGoIk7Vslkj7Av8aaLHLJqzSQka0qN6Lo"
 SENIAT_USER = "v9684209"
 SENIAT_PASS = "v9684209"
 
@@ -53,10 +57,21 @@ ADMIN_USER_ID = 2098655970
 USERS_FILE = "authorized_users.txt"
 LOGS_FILE = "consultas_logs.txt"
 
-# Sesión HTTP global para manejar cookies del SENIAT
+SESSION_DURATION = 30 * 60  # 30 minutos en segundos
+_last_successful_login = 0
+
+# Sesión HTTP persistente
 seniat_session = requests.Session()
-_last_login_time = 0
-SESSION_MAX_AGE = 25 * 60  # 25 minutos
+seniat_session.headers.update({
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "es-ES,es;q=0.9,en;q=0.8"
+})
+
+retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504], allowed_methods=["GET", "POST"])
+adapter = HTTPAdapter(max_retries=retries)
+seniat_session.mount("http://", adapter)
+seniat_session.mount("https://", adapter)
 
 consulta_lock = asyncio.Lock()
 
@@ -134,6 +149,33 @@ async def notificar_admin_consulta(bot, user, parametro_busqueda: str, tipo_cons
 
 
 # ==============================================================================
+# CONSULTA MYSQL (SERVIDOR SERV00.COM)
+# ==============================================================================
+def consultar_telefono_mysql(cedula: str) -> list:
+    telefonos = []
+    try:
+        url = f"http://victor159.serv00.net/consulta.php?cedula={cedula}"
+        response = requests.get(url, timeout=20, verify=False)
+        if response.status_code == 200 and response.text.strip():
+            telefonos = response.json()
+    except Exception as e:
+        logger.error(f"Error al consultar el script PHP en serv00: {e}")
+    return telefonos
+
+
+def consultar_inversa_mysql(telefono: str) -> list:
+    coincidencias = []
+    try:
+        url = f"http://victor159.serv00.net/consulta.php?telefono={telefono}"
+        response = requests.get(url, timeout=20, verify=False)
+        if response.status_code == 200 and response.text.strip():
+            coincidencias = response.json()
+    except Exception as e:
+        logger.error(f"Error en consulta por teléfono: {e}")
+    return coincidencias
+
+
+# ==============================================================================
 # COMANDOS DE ADMINISTRADOR
 # ==============================================================================
 async def cmd_autorizar(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -192,34 +234,7 @@ async def cmd_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ==============================================================================
-# CONSULTA MYSQL (SERVIDOR SERV00.COM)
-# ==============================================================================
-def consultar_telefono_mysql(cedula: str) -> list:
-    telefonos = []
-    try:
-        url = f"http://victor159.serv00.net/consulta.php?cedula={cedula}"
-        response = requests.get(url, timeout=15)
-        if response.status_code == 200 and response.text.strip():
-            telefonos = response.json()
-    except Exception as e:
-        logger.error(f"Error al consultar el script PHP en serv00: {e}")
-    return telefonos
-
-
-def consultar_inversa_mysql(telefono: str) -> list:
-    coincidencias = []
-    try:
-        url = f"http://victor159.serv00.net/consulta.php?telefono={telefono}"
-        response = requests.get(url, timeout=15)
-        if response.status_code == 200 and response.text.strip():
-            coincidencias = response.json()
-    except Exception as e:
-        logger.error(f"Error en consulta por teléfono: {e}")
-    return coincidencias
-
-
-# ==============================================================================
-# CÁLCULO DE EDAD Y GENERADOR DE REPORTE PDF
+# CÁLCULO DE EDAD Y GENERADOR DE REPORTE PDF PROFESIONAL
 # ==============================================================================
 def calcular_edad(fecha_nacimiento_str: str) -> str:
     try:
@@ -475,12 +490,12 @@ def generar_documento_pdf(
 
 
 # ==============================================================================
-# CONSULTAS PÚBLICAS Y HTTP (SENIAT E IVSS)
+# CONSULTAS PÚBLICAS (SENIAT & IVSS)
 # ==============================================================================
 def consultar_seniat_y_nombre(cedula: str):
     url = f"http://contribuyente.seniat.gob.ve/relacionesrif/inicioConsulta.do?personalidad=1&ci={cedula}"
     try:
-        response = requests.get(url, timeout=12)
+        response = seniat_session.get(url, timeout=12, verify=False)
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, "html.parser")
             texto_total = soup.get_text(separator=" ", strip=True)
@@ -532,7 +547,7 @@ def consultar_seniat_y_nombre(cedula: str):
         
         return "No especificado", "", "❌ *SENIAT:* Error de conexión.", []
     except Exception as e:
-        logger.error(f"Error SENIAT Público: {e}")
+        logger.error(f"Error SENIAT: {e}")
         return "No especificado", "", "❌ *SENIAT:* Error en petición.", []
 
 
@@ -547,9 +562,9 @@ def consultar_ivss(cedula: str):
     }
     try:
         session = requests.Session()
-        session.get(url_base, headers=headers, timeout=15)
+        session.get(url_base, headers=headers, timeout=15, verify=False)
         payload = {"Accion": "", "Accion1": "", "nacionalidad_aseg": "V", "cedula_aseg": cedula, "consultar": "Buscar"}
-        response = session.post(url_accion, data=payload, headers=headers, timeout=20)
+        response = session.post(url_accion, data=payload, headers=headers, timeout=20, verify=False)
 
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, "html.parser")
@@ -605,85 +620,57 @@ def consultar_ivss(cedula: str):
 
 
 # ==============================================================================
-# GESTIÓN HTTP PURA OPTIMIZADA PARA EXPEDIENTE SENIAT
+# MOTOR HTTP COMPLETO DE SCRAPING DE EXPEDIENTE (REPARADO DEFINITIVAMENTE)
 # ==============================================================================
-def verificar_o_iniciar_sesion_http():
-    global seniat_session, _last_login_time
-    ahora = time.time()
-    
-    if (ahora - _last_login_time) < SESSION_MAX_AGE:
-        try:
-            r = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosbasicos.do", timeout=10)
-            if "login" not in r.url.lower():
-                return False, None
-        except Exception:
-            pass
-
+def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: str = ""):
     try:
-        login_url = "http://contribuyente.seniat.gob.ve/iseniatlogin/contribuyente.do"
-        seniat_session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-        resp = seniat_session.get(login_url, timeout=12)
-        
-        soup = BeautifulSoup(resp.text, "html.parser")
-        img_tag = soup.find("img", src=re.compile("kapatch|Kapatch|kaptcha", re.IGNORECASE))
-        
-        if img_tag and img_tag.get("src"):
-            src = img_tag["src"]
-            if not src.startswith("http"):
-                captcha_url = "http://contribuyente.seniat.gob.ve/iseniatlogin/" + src.lstrip("/")
-            else:
-                captcha_url = src
-                
-            img_resp = seniat_session.get(captcha_url, timeout=10)
-            if img_resp.status_code == 200 and len(img_resp.content) > 100:
-                return True, img_resp.content
+        url_inicio = "http://contribuyente.seniat.gob.ve/rifconsulta/login.do"
+        resp_ini = seniat_session.get(url_inicio, timeout=12, verify=False)
+        print(f"[DEBUG] Acceso a login.do -> Status: {resp_ini.status_code}")
 
-        return True, b""
-    except Exception as e:
-        logger.error(f"Error HTTP obteniendo captcha: {e}")
-        return True, b""
-
-
-def login_con_captcha_http(codigo_captcha: str):
-    global seniat_session, _last_login_time
-    try:
-        login_url = "http://contribuyente.seniat.gob.ve/iseniatlogin/contribuyente.do"
-        payload = {
-            "usuario": SENIAT_USER,
-            "clave": SENIAT_PASS,
-            "kaptcha": codigo_captcha,
-            "buscar": "Entrar"
-        }
-        resp = seniat_session.post(login_url, data=payload, timeout=15)
-        contenido = resp.text.lower()
-        
-        if "mensajeerror" in contenido or "incorrecto" in contenido or "inválido" in contenido or "login" in resp.url.lower():
-            return False, "Código Captcha incorrecto o credenciales rechazadas."
-
-        _last_login_time = time.time()
-        return True, ""
-    except Exception as e:
-        return False, str(e)
-
-
-def ejecutar_consulta_rif_http(target_val: str, tipo_consulta: str, rif_exacto: str = ""):
-    global seniat_session
-    try:
+        # REPARACIÓN DÍGITOS: No cortar la cédula bajo ninguna circunstancia
         cedula_limpia = re.sub(r"\D", "", target_val)
-        rif_usar = f"V{cedula_limpia}" if tipo_consulta == "CEDULA" else (rif_exacto if rif_exacto else target_val.strip())
+        if tipo_consulta == "CEDULA":
+            rif_usar = f"V{cedula_limpia}"
+        else:
+            rif_usar = rif_exacto if rif_exacto else target_val.strip()
 
-        # 1. Enviar búsqueda RIF/CI a login.do para fijar el contribuyente en sesión
-        busqueda_url = "http://contribuyente.seniat.gob.ve/rifconsulta/login.do"
-        seniat_session.post(busqueda_url, data={"rif": rif_usar, "buscar": "Consultar"}, timeout=15)
+        payload = {
+            "rif": rif_usar,
+            "cedula": "",
+            "buscar": "Buscar"
+        }
 
-        # 2. Abrir expediente
-        seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/buscarexpediente.do", timeout=15)
+        resp_busqueda = seniat_session.post(url_inicio, data=payload, headers={"Referer": url_inicio}, timeout=15, verify=False)
+        print(f"[DEBUG] POST búsqueda RIF/Cédula ({rif_usar}) -> Status: {resp_busqueda.status_code}")
 
-        # 3. DATOS BÁSICOS
+        soup_b = BeautifulSoup(resp_busqueda.text, "html.parser")
+
+        url_expediente = None
+        for a in soup_b.find_all("a", href=True):
+            if "buscarexpediente.do" in a["href"] or "idContribuyente" in a["href"] or "rif=" in a["href"]:
+                url_expediente = a["href"]
+                if not url_expediente.startswith("http"):
+                    url_expediente = "http://contribuyente.seniat.gob.ve/rifconsulta/" + url_expediente.lstrip("/")
+                break
+
+        print(f"[DEBUG] URL de expediente encontrada: {url_expediente}")
+
+        if url_expediente:
+            resp_exp = seniat_session.get(url_expediente, headers={"Referer": url_inicio}, timeout=12, verify=False)
+            print(f"[DEBUG] Visita a expediente -> Status: {resp_exp.status_code}")
+        else:
+            fallback_url = f"http://contribuyente.seniat.gob.ve/rifconsulta/buscarexpediente.do?rif={rif_usar}"
+            seniat_session.get(fallback_url, headers={"Referer": url_inicio}, timeout=12, verify=False)
+
+        ref_expediente = url_expediente if url_expediente else "http://contribuyente.seniat.gob.ve/rifconsulta/buscarexpediente.do"
+
+        # 1. DATOS BÁSICOS
         datos_basicos = {"nombre_razon": "NO INDICA", "fecha_nacimiento": "NO INDICA", "correo": "NO INDICA"}
         try:
-            r_db = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosbasicos.do", timeout=12)
-            soup_db = BeautifulSoup(r_db.text, "html.parser")
+            resp_db = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosbasicos.do", headers={"Referer": ref_expediente}, timeout=12, verify=False)
+            print(f"[DEBUG] Datos Básicos URL -> Status: {resp_db.status_code}")
+            soup_db = BeautifulSoup(resp_db.text, "html.parser")
 
             for tr in soup_db.find_all("tr"):
                 texto_tr = tr.get_text(separator=" ", strip=True).upper()
@@ -705,14 +692,15 @@ def ejecutar_consulta_rif_http(target_val: str, tipo_consulta: str, rif_exacto: 
                         val = td.get_text(strip=True)
                         if "@" in val: datos_basicos["correo"] = val
         except Exception as e:
-            logger.error(f"Error extrayendo datos básicos HTTP: {e}")
+            print(f"[ERROR] Excepción en datos básicos: {e}")
 
-        # 4. DIRECCIONES
+        # 2. DIRECCIONES
         dir_info = []
         try:
-            r_dir = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosdirecciones.do?consultar=S", timeout=12)
-            soup_dir = BeautifulSoup(r_dir.text, "html.parser")
-
+            resp_dir = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosdirecciones.do?consultar=S", headers={"Referer": ref_expediente}, timeout=12, verify=False)
+            print(f"[DEBUG] Direcciones URL -> Status: {resp_dir.status_code}")
+            soup_dir = BeautifulSoup(resp_dir.text, "html.parser")
+            
             for tr in soup_dir.find_all("tr"):
                 subts = tr.find_all(class_="tablaSubTitulo")
                 smalls = tr.find_all(class_="letrasSmall")
@@ -722,38 +710,34 @@ def ejecutar_consulta_rif_http(target_val: str, tipo_consulta: str, rif_exacto: 
                         val = sm.get_text(strip=True).replace("\u00a0", " ")
                         if lbl and val:
                             dir_info.append({"etiqueta": lbl, "valor": val.upper()})
-                
-                if not dir_info:
-                    tds = tr.find_all("td")
-                    if len(tds) >= 2:
-                        lbl_t = tds[0].get_text(strip=True)
-                        val_t = tds[1].get_text(strip=True)
-                        if lbl_t and val_t and lbl_t != ":" and len(lbl_t) < 40:
-                            dir_info.append({"etiqueta": lbl_t, "valor": val_t.upper()})
+            print(f"[DEBUG] Direcciones encontradas: {len(dir_info)}")
         except Exception as e:
-            logger.error(f"Error extrayendo direcciones HTTP: {e}")
+            print(f"[ERROR] Excepción en direcciones: {e}")
 
         cargas_familiares = []
         relaciones_empresa = []
 
-        # 5. CARGAS FAMILIARES
+        # 3. CARGAS FAMILIARES
         if tipo_consulta == "CEDULA":
             try:
-                r_cf = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datoscargasfamiliares.do", timeout=12)
-                soup_cf = BeautifulSoup(r_cf.text, "html.parser")
-
+                resp_cf = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datoscargasfamiliares.do", headers={"Referer": ref_expediente}, timeout=12, verify=False)
+                print(f"[DEBUG] Cargas Familiares URL -> Status: {resp_cf.status_code}")
+                soup_cf = BeautifulSoup(resp_cf.text, "html.parser")
+                
                 carga_links = []
                 for a in soup_cf.find_all("a", href=True):
-                    href = a["href"]
-                    if "consultar=S&idCarga=" in href or "idCarga=" in href:
+                    if "consultar=S&idCarga=" in a["href"]:
+                        href = a["href"]
                         if not href.startswith("http"):
                             href = "http://contribuyente.seniat.gob.ve/rifconsulta/" + href.lstrip("/")
-                        carga_links.append((a.get_text(strip=True) or "Familiar", href))
+                        carga_links.append((a.get_text(strip=True), href))
+
+                print(f"[DEBUG] Enlaces de cargas familiares encontrados: {len(carga_links)}")
 
                 for parentesco, link_detalle in carga_links:
-                    r_det = seniat_session.get(link_detalle, timeout=10)
-                    soup_det = BeautifulSoup(r_det.text, "html.parser")
-
+                    resp_det = seniat_session.get(link_detalle, headers={"Referer": "http://contribuyente.seniat.gob.ve/rifconsulta/datoscargasfamiliares.do"}, timeout=10, verify=False)
+                    soup_det = BeautifulSoup(resp_det.text, "html.parser")
+                    
                     nombres, cedula_c, f_nac, inf_med = "NO INDICA", "NO INDICA", "NO INDICA", "NO INDICA"
                     for row in soup_det.find_all("tr"):
                         cells = row.find_all("td")
@@ -763,7 +747,7 @@ def ejecutar_consulta_rif_http(target_val: str, tipo_consulta: str, rif_exacto: 
                                 val = row.find_next_sibling().find_all("td")[c_idx].get_text(strip=True)
                                 if "NOMBRES" in lbl and val and val != ":": nombres = val
                                 if ("CEDULA" in lbl or "C.I." in lbl) and val and val != ":": cedula_c = val
-                                if "NACIMIENTO" in lbl and val and val != ":": f_nac = val
+                                if "FECHA DE NACIMIENTO" in lbl and val and val != ":": f_nac = val
                                 if "INFORME MEDICO" in lbl and val and val != ":": inf_med = val
 
                     edad_c = calcular_edad(f_nac) if f_nac != "NO INDICA" else "No calculable"
@@ -776,14 +760,15 @@ def ejecutar_consulta_rif_http(target_val: str, tipo_consulta: str, rif_exacto: 
                         "nro_informe_medico": inf_med
                     })
             except Exception as e:
-                logger.error(f"Error extrayendo cargas familiares HTTP: {e}")
+                print(f"[ERROR] Excepción en cargas familiares: {e}")
 
-        # 6. RELACIONES / EMPRESAS
+        # 4. RELACIONES / EMPRESAS
         if tipo_consulta == "RIF":
             try:
-                r_rel = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosrelaciones.do", timeout=12)
-                soup_rel = BeautifulSoup(r_rel.text, "html.parser")
-
+                resp_rel = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosrelaciones.do", headers={"Referer": ref_expediente}, timeout=12, verify=False)
+                print(f"[DEBUG] Relaciones URL -> Status: {resp_rel.status_code}")
+                soup_rel = BeautifulSoup(resp_rel.text, "html.parser")
+                
                 for tr in soup_rel.find_all("tr", class_=["letrasLista", "tablaFilas"]):
                     tds = tr.find_all("td")
                     if len(tds) >= 2:
@@ -795,7 +780,7 @@ def ejecutar_consulta_rif_http(target_val: str, tipo_consulta: str, rif_exacto: 
                             "fecha": cols[3] if len(cols) > 3 else "NO INDICA"
                         })
             except Exception as e:
-                logger.error(f"Error extrayendo relaciones HTTP: {e}")
+                print(f"[ERROR] Excepción en relaciones: {e}")
 
         return {
             "dir_info": dir_info,
@@ -804,7 +789,7 @@ def ejecutar_consulta_rif_http(target_val: str, tipo_consulta: str, rif_exacto: 
             "relaciones_empresa": relaciones_empresa
         }
     except Exception as e:
-        logger.error(f"Error crítico en HTTP scraper: {e}")
+        print(f"[ERROR CRÍTICO] ejecutar_consulta_rif_sync: {e}")
         return None
 
 
@@ -819,6 +804,7 @@ async def ejecutar_consulta_rif(target_val: str, tipo_consulta: str, update: Upd
     ivss_estructurado, res_ivss = [], ""
     telefonos_registrados = []
     
+    # REPARACIÓN DÍGITOS: Garantizar la cédula intacta para consultas secundarias
     target_val_limpio = re.sub(r"\D", "", target_val)
 
     if tipo_consulta == "CEDULA":
@@ -826,7 +812,7 @@ async def ejecutar_consulta_rif(target_val: str, tipo_consulta: str, update: Upd
         ivss_estructurado, res_ivss = await asyncio.to_thread(consultar_ivss, target_val_limpio)
         telefonos_registrados = await asyncio.to_thread(consultar_telefono_mysql, target_val_limpio)
 
-    resultado_dict = await asyncio.to_thread(ejecutar_consulta_rif_http, target_val_limpio, tipo_consulta, rif_exacto)
+    resultado_dict = await asyncio.to_thread(ejecutar_consulta_rif_sync, target_val_limpio, tipo_consulta, rif_exacto)
 
     if not resultado_dict:
         try:
@@ -954,6 +940,80 @@ async def ejecutar_consulta_rif(target_val: str, tipo_consulta: str, update: Upd
 
 
 # ==============================================================================
+# MANEJADOR DE LOGIN Y CAPTCHA MEDIANTE REQUESTS (HTTP)
+# ==============================================================================
+def verificar_o_iniciar_sesion_sync():
+    global _last_successful_login
+    tiempo_transcurrido = time.time() - _last_successful_login
+
+    if tiempo_transcurrido < SESSION_DURATION:
+        try:
+            test_resp = seniat_session.get(
+                "http://contribuyente.seniat.gob.ve/rifconsulta/datosbasicos.do",
+                timeout=10,
+                verify=False
+            )
+            if test_resp.status_code == 200 and "login" not in test_resp.url.lower():
+                return False, None  # Sesión activa
+        except Exception:
+            pass
+
+    login_url = "http://contribuyente.seniat.gob.ve/iseniatlogin/contribuyente.do"
+    resp = seniat_session.get(login_url, timeout=15, verify=False)
+    soup = BeautifulSoup(resp.text, "html.parser")
+    
+    img_tag = soup.find("img", src=re.compile("kapatch", re.IGNORECASE))
+    if not img_tag:
+        for img in soup.find_all("img"):
+            if "kapatch" in img.get("src", "").lower():
+                img_tag = img
+                break
+
+    if img_tag:
+        src = img_tag.get("src")
+        if src.startswith("http"):
+            captcha_url = src
+        else:
+            captcha_url = "http://contribuyente.seniat.gob.ve/iseniatlogin/" + src.lstrip("/")
+        
+        headers_captcha = {"Referer": login_url}
+        cap_resp = seniat_session.get(captcha_url, headers=headers_captcha, timeout=10, verify=False)
+        return True, cap_resp.content
+
+    return True, b""
+
+
+def login_con_captcha_sync(codigo_captcha: str):
+    global _last_successful_login
+    login_action_url = "http://contribuyente.seniat.gob.ve/iseniatlogin/login.do"
+    referer_url = "http://contribuyente.seniat.gob.ve/iseniatlogin/contribuyente.do"
+    
+    payload = {
+        "usuario": SENIAT_USER,
+        "clave": SENIAT_PASS,
+        "kaptcha": codigo_captcha,
+        "buscar": "Aceptar"
+    }
+    
+    headers = {
+        "Referer": referer_url,
+        "Content-Type": "application/x-www-form-urlencoded"
+    }
+
+    resp_post = seniat_session.post(login_action_url, data=payload, headers=headers, timeout=20, verify=False)
+    resp_text = resp_post.text.lower()
+    
+    if "mensajeerror" in resp_text or "incorrecto" in resp_text or "inválido" in resp_text:
+        soup = BeautifulSoup(resp_post.text, "html.parser")
+        err_div = soup.find(id="mensajeError")
+        err_txt = err_div.get_text(strip=True) if err_div else "Código captcha incorrecto o datos no válidos"
+        return False, err_txt
+
+    _last_successful_login = time.time()
+    return True, ""
+
+
+# ==============================================================================
 # MANEJADOR DE MENSAJES TELEGRAM
 # ==============================================================================
 async def manejar_cedula_o_texto(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1022,21 +1082,13 @@ async def manejar_cedula_o_texto(update: Update, context: ContextTypes.DEFAULT_T
 
     registrar_log_consulta(user, parametro_busqueda, tipo_consulta)
 
-    msg_espera = await update.message.reply_text(f"🔄 Procesando consulta HTTP (`{parametro_busqueda}`)...", parse_mode="Markdown")
+    msg_espera = await update.message.reply_text(f"🔄 Procesando consulta de {tipo_consulta} (`{parametro_busqueda}`)...", parse_mode="Markdown")
     
     async with consulta_lock:
         try:
-            necesita_login, captcha_bytes = await asyncio.to_thread(verificar_o_iniciar_sesion_http)
+            necesita_login, captcha_bytes = await asyncio.to_thread(verificar_o_iniciar_sesion_sync)
 
             if necesita_login:
-                if not captcha_bytes:
-                    try:
-                        await update.get_bot().delete_message(chat_id=update.effective_chat.id, message_id=msg_espera.message_id)
-                    except Exception:
-                        pass
-                    await update.message.reply_text("❌ No se pudo cargar el captcha del SENIAT. Inténtalo de nuevo en unos segundos.")
-                    return ConversationHandler.END
-
                 context.user_data["pending_target"] = parametro_busqueda
                 context.user_data["pending_tipo"] = tipo_consulta
 
@@ -1090,11 +1142,11 @@ async def recibir_captcha_y_consultar(update: Update, context: ContextTypes.DEFA
         await update.message.reply_text("⚠️ Sesión expirada. Envía la consulta nuevamente.")
         return ConversationHandler.END
 
-    msg_espera = await update.message.reply_text("🔄 Validando sesión en SENIAT por HTTP...")
+    msg_espera = await update.message.reply_text("🔄 Procesando consulta...")
 
     async with consulta_lock:
         try:
-            exito, err_msg = await asyncio.to_thread(login_con_captcha_http, codigo_usuario)
+            exito, err_msg = await asyncio.to_thread(login_con_captcha_sync, codigo_usuario)
 
             if not exito:
                 try:
@@ -1127,7 +1179,7 @@ async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("autorizar", cmd_autorizar))
     app.add_handler(CommandHandler("revocar", cmd_revocar))
@@ -1143,7 +1195,7 @@ def main():
 
     app.add_handler(conv_handler)
 
-    print("🤖 Bot activo con Motor HTTP Puro y Extracción Completa en Ubuntu PRoot...")
+    print("🤖 Bot activo con Requests y BeautifulSoup en Termux (Android)...")
     app.run_polling(bootstrap_retries=-1)
 
 

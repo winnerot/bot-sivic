@@ -611,7 +611,7 @@ def consultar_ivss(cedula: str):
 
 
 # ==============================================================================
-# MOTOR SELENIUM (CON WEBDRIVER-MANAGER)
+# MOTOR SELENIUM (OPTIMIZADO PARA PROOT / ARM64)
 # ==============================================================================
 def inicializar_driver():
     global driver
@@ -621,13 +621,13 @@ def inicializar_driver():
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--disable-gpu")
-        options.add_argument("--remote-debugging-port=0")
-        options.add_argument("--disable-software-rasterizer")
-        options.add_argument("--disable-extensions")
+        options.add_argument("--disable-setuid-sandbox")
+        options.add_argument("--no-zygote")
+        options.add_argument("--single-process")
+        options.add_argument("--disable-accelerated-2d-canvas")
         options.add_argument("--disable-infobars")
         
         try:
-            # Usamos ChromeDriverManager para descargar y configurar automáticamente el driver compatible
             service = Service(ChromeDriverManager().install())
             driver = webdriver.Chrome(service=service, options=options)
         except Exception as e:

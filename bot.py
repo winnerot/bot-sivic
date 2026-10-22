@@ -161,64 +161,6 @@ def consultar_inversa_mysql(telefono: str) -> list:
 
 
 # ==============================================================================
-# COMANDOS DE ADMINISTRADOR
-# ==============================================================================
-async def cmd_autorizar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_USER_ID:
-        await update.message.reply_text("❌ No tienes permisos de administrador.")
-        return
-    args = context.args
-    target_id = None
-    if update.message.reply_to_message:
-        target_id = update.message.reply_to_message.from_user.id
-    elif args and args[0].isdigit():
-        target_id = int(args[0])
-
-    if not target_id:
-        await update.message.reply_text("⚠️ Uso incorrecto. Responde a un mensaje o usa: `/autorizar ID`", parse_mode="Markdown")
-        return
-
-    guardar_usuario_autorizado(target_id)
-    await update.message.reply_text(f"✅ ¡Usuario `{target_id}` autorizado exitosamente!", parse_mode="Markdown")
-
-
-async def cmd_revocar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_USER_ID:
-        await update.message.reply_text("❌ No tienes permisos de administrador.")
-        return
-    args = context.args
-    target_id = None
-    if update.message.reply_to_message:
-        target_id = update.message.reply_to_message.from_user.id
-    elif args and args[0].isdigit():
-        target_id = int(args[0])
-
-    if not target_id:
-        await update.message.reply_text("⚠️ Uso incorrecto. Responde a un mensaje o usa: `/revocar ID`", parse_mode="Markdown")
-        return
-    if target_id == ADMIN_USER_ID:
-        await update.message.reply_text("❌ No puedes revocarle el acceso al administrador principal.")
-        return
-
-    remover_usuario_autorizado(target_id)
-    await update.message.reply_text(f"🚫 Acceso revocado para el usuario `{target_id}`.", parse_mode="Markdown")
-
-
-async def cmd_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_USER_ID:
-        await update.message.reply_text("❌ No tienes permisos.")
-        return
-    if not os.path.exists(LOGS_FILE):
-        await update.message.reply_text("ℹ️ Aún no hay registros de consultas guardados.")
-        return
-    try:
-        with open(LOGS_FILE, "rb") as f:
-            await update.message.reply_document(document=f, caption="📊 *Historial de Consultas Realizadas*", parse_mode="Markdown")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error al enviar logs: {e}")
-
-
-# ==============================================================================
 # CÁLCULO DE EDAD Y GENERADOR DE REPORTE PDF
 # ==============================================================================
 def calcular_edad(fecha_nacimiento_str: str) -> str:
@@ -605,13 +547,12 @@ def consultar_ivss(cedula: str):
 
 
 # ==============================================================================
-# GESTIÓN HTTP PURA (SIN SELENIUM)
+# GESTIÓN HTTP PURA OPTIMIZADA PARA EXPEDIENTE SENIAT
 # ==============================================================================
 def verificar_o_iniciar_sesion_http():
     global seniat_session, _last_login_time
     ahora = time.time()
     
-    # Si la sesión sigue vigente por tiempo
     if (ahora - _last_login_time) < SESSION_MAX_AGE:
         try:
             r = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosbasicos.do", timeout=10)
@@ -621,13 +562,12 @@ def verificar_o_iniciar_sesion_http():
             pass
 
     try:
-        # Cargar página de login para obtener cookies
         login_url = "http://contribuyente.seniat.gob.ve/iseniatlogin/contribuyente.do"
         seniat_session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
         resp = seniat_session.get(login_url, timeout=12)
         
         soup = BeautifulSoup(resp.text, "html.parser")
-        img_tag = soup.find("img", src=re.compile("kapatch|Kapatch", re.IGNORECASE))
+        img_tag = soup.find("img", src=re.compile("kapatch|Kapatch|kaptcha", re.IGNORECASE))
         
         if img_tag and img_tag.get("src"):
             src = img_tag["src"]
@@ -636,15 +576,6 @@ def verificar_o_iniciar_sesion_http():
             else:
                 captcha_url = src
                 
-            img_resp = seniat_session.get(captcha_url, timeout=10)
-            if img_resp.status_code == 200 and len(img_resp.content) > 100:
-                return True, img_resp.content
-                
-        # Alternativa por si el src está en otro formato
-        img_alt = soup.find("img", src=re.compile("kaptcha", re.IGNORECASE))
-        if img_alt:
-            src = img_alt["src"]
-            captcha_url = "http://contribuyente.seniat.gob.ve/iseniatlogin/" + src.lstrip("/")
             img_resp = seniat_session.get(captcha_url, timeout=10)
             if img_resp.status_code == 200 and len(img_resp.content) > 100:
                 return True, img_resp.content
@@ -683,14 +614,14 @@ def ejecutar_consulta_rif_http(target_val: str, tipo_consulta: str, rif_exacto: 
         cedula_limpia = re.sub(r"\D", "", target_val)
         rif_usar = f"V{cedula_limpia}" if tipo_consulta == "CEDULA" else (rif_exacto if rif_exacto else target_val.strip())
 
-        # Enviar búsqueda RIF/CI
+        # 1. Enviar búsqueda RIF/CI a login.do para fijar el contribuyente en sesión
         busqueda_url = "http://contribuyente.seniat.gob.ve/rifconsulta/login.do"
         seniat_session.post(busqueda_url, data={"rif": rif_usar, "buscar": "Consultar"}, timeout=15)
 
-        # Ir a expediente
+        # 2. Abrir expediente
         seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/buscarexpediente.do", timeout=15)
 
-        # 1. DATOS BÁSICOS
+        # 3. DATOS BÁSICOS
         datos_basicos = {"nombre_razon": "NO INDICA", "fecha_nacimiento": "NO INDICA", "correo": "NO INDICA"}
         try:
             r_db = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosbasicos.do", timeout=12)
@@ -718,7 +649,7 @@ def ejecutar_consulta_rif_http(target_val: str, tipo_consulta: str, rif_exacto: 
         except Exception as e:
             logger.error(f"Error extrayendo datos básicos HTTP: {e}")
 
-        # 2. DIRECCIONES
+        # 4. DIRECCIONES (Fuerza parámetro consultar=S)
         dir_info = []
         try:
             r_dir = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosdirecciones.do?consultar=S", timeout=12)
@@ -733,13 +664,22 @@ def ejecutar_consulta_rif_http(target_val: str, tipo_consulta: str, rif_exacto: 
                         val = sm.get_text(strip=True).replace("\u00a0", " ")
                         if lbl and val:
                             dir_info.append({"etiqueta": lbl, "valor": val.upper()})
+                
+                # Extracción alternativa basada en tablas si la estructura varía
+                if not dir_info:
+                    tds = tr.find_all("td")
+                    if len(tds) >= 2:
+                        lbl_t = tds[0].get_text(strip=True)
+                        val_t = tds[1].get_text(strip=True)
+                        if lbl_t and val_t and lbl_t != ":" and len(lbl_t) < 40:
+                            dir_info.append({"etiqueta": lbl_t, "valor": val_t.upper()})
         except Exception as e:
             logger.error(f"Error extrayendo direcciones HTTP: {e}")
 
         cargas_familiares = []
         relaciones_empresa = []
 
-        # 3. CARGAS FAMILIARES
+        # 5. CARGAS FAMILIARES
         if tipo_consulta == "CEDULA":
             try:
                 r_cf = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datoscargasfamiliares.do", timeout=12)
@@ -747,11 +687,11 @@ def ejecutar_consulta_rif_http(target_val: str, tipo_consulta: str, rif_exacto: 
 
                 carga_links = []
                 for a in soup_cf.find_all("a", href=True):
-                    if "consultar=S&idCarga=" in a["href"]:
-                        href = a["href"]
+                    href = a["href"]
+                    if "consultar=S&idCarga=" in href or "idCarga=" in href:
                         if not href.startswith("http"):
                             href = "http://contribuyente.seniat.gob.ve/rifconsulta/" + href.lstrip("/")
-                        carga_links.append((a.get_text(strip=True), href))
+                        carga_links.append((a.get_text(strip=True) or "Familiar", href))
 
                 for parentesco, link_detalle in carga_links:
                     r_det = seniat_session.get(link_detalle, timeout=10)
@@ -781,7 +721,7 @@ def ejecutar_consulta_rif_http(target_val: str, tipo_consulta: str, rif_exacto: 
             except Exception as e:
                 logger.error(f"Error extrayendo cargas familiares HTTP: {e}")
 
-        # 4. RELACIONES / EMPRESAS
+        # 6. RELACIONES / EMPRESAS
         if tipo_consulta == "RIF":
             try:
                 r_rel = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosrelaciones.do", timeout=12)
@@ -1080,7 +1020,7 @@ async def recibir_captcha_y_consultar(update: Update, context: ContextTypes.DEFA
 
     if captcha_msg_id:
         try:
-            await update.get_bot().delete_message(chat_id=update.effective_chat.id, message_id=captcha_msg_id)
+            await update.get_bot().delete_image(chat_id=update.effective_chat.id, message_id=captcha_msg_id)
         except Exception:
             pass
 
@@ -1146,7 +1086,7 @@ def main():
 
     app.add_handler(conv_handler)
 
-    print("🤖 Bot activo con Motor HTTP Puro en Ubuntu PRoot...")
+    print("🤖 Bot activo con Motor HTTP Puro y Extracción Completa en Ubuntu PRoot...")
     app.run_polling(bootstrap_retries=-1)
 
 

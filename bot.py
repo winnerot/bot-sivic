@@ -10,7 +10,6 @@ from bs4 import BeautifulSoup
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 
 from telegram import Update
@@ -610,7 +609,7 @@ def consultar_ivss(cedula: str):
 
 
 # ==============================================================================
-# MOTOR SELENIUM (INICIALIZACIÓN ROBUSTA)
+# MOTOR SELENIUM (GESTIÓN AUTOMÁTICA NATIVA SIN RUTA ESTÁTICA)
 # ==============================================================================
 def inicializar_driver():
     global driver
@@ -625,23 +624,9 @@ def inicializar_driver():
         options.add_argument("--disable-extensions")
         options.add_argument("--disable-infobars")
         
-        rutas_driver = [
-            "/usr/bin/chromedriver",
-            "/usr/lib/chromium-browser/chromedriver",
-            "/usr/lib/chromium/chromedriver"
-        ]
-        
-        service = None
-        for ruta in rutas_driver:
-            if os.path.exists(ruta):
-                service = Service(executable_path=ruta)
-                break
-                
         try:
-            if service:
-                driver = webdriver.Chrome(service=service, options=options)
-            else:
-                driver = webdriver.Chrome(options=options)
+            # Selenium Manager buscará o descargará automáticamente el driver compatible en PRoot
+            driver = webdriver.Chrome(options=options)
         except Exception as e:
             logger.error(f"Error crítico al iniciar Chrome/ChromeDriver: {e}")
             raise e
@@ -671,7 +656,8 @@ def verificar_o_iniciar_sesion_selenium():
         img_element = driver.find_element(By.XPATH, "//img[contains(@src, 'kapatch') or contains(@src, 'Kapatch')]")
         captcha_bytes = img_element.screenshot_as_png
         return True, captcha_bytes
-    except Exception:
+    except Exception as e:
+        logger.error(f"Error capturando el captcha: {e}")
         return True, b""
 
 
@@ -1065,6 +1051,14 @@ async def manejar_cedula_o_texto(update: Update, context: ContextTypes.DEFAULT_T
             necesita_login, captcha_bytes = await asyncio.to_thread(verificar_o_iniciar_sesion_selenium)
 
             if necesita_login:
+                if not captcha_bytes:
+                    try:
+                        await update.get_bot().delete_message(chat_id=update.effective_chat.id, message_id=msg_espera.message_id)
+                    except Exception:
+                        pass
+                    await update.message.reply_text("❌ No se pudo cargar el captcha del SENIAT. Inténtalo de nuevo en unos segundos.")
+                    return ConversationHandler.END
+
                 context.user_data["pending_target"] = parametro_busqueda
                 context.user_data["pending_tipo"] = tipo_consulta
 
@@ -1171,7 +1165,7 @@ def main():
 
     app.add_handler(conv_handler)
 
-    print("🤖 Bot activo con Selenium en Ubuntu PRoot...")
+    print("🤖 Bot activo con Selenium Manager en Ubuntu PRoot...")
     app.run_polling(bootstrap_retries=-1)
 
 

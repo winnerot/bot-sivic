@@ -10,7 +10,9 @@ from bs4 import BeautifulSoup
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
+from webdriver_manager.chrome import ChromeDriverManager
 
 from telegram import Update
 from telegram.ext import (
@@ -609,7 +611,7 @@ def consultar_ivss(cedula: str):
 
 
 # ==============================================================================
-# MOTOR SELENIUM (GESTIÓN AUTOMÁTICA NATIVA SIN RUTA ESTÁTICA)
+# MOTOR SELENIUM (CON WEBDRIVER-MANAGER)
 # ==============================================================================
 def inicializar_driver():
     global driver
@@ -625,10 +627,11 @@ def inicializar_driver():
         options.add_argument("--disable-infobars")
         
         try:
-            # Selenium Manager buscará o descargará automáticamente el driver compatible en PRoot
-            driver = webdriver.Chrome(options=options)
+            # Usamos ChromeDriverManager para descargar y configurar automáticamente el driver compatible
+            service = Service(ChromeDriverManager().install())
+            driver = webdriver.Chrome(service=service, options=options)
         except Exception as e:
-            logger.error(f"Error crítico al iniciar Chrome/ChromeDriver: {e}")
+            logger.error(f"Error crítico al iniciar Chrome/ChromeDriver con WebDriverManager: {e}")
             raise e
 
 
@@ -1165,7 +1168,7 @@ def main():
 
     app.add_handler(conv_handler)
 
-    print("🤖 Bot activo con Selenium Manager en Ubuntu PRoot...")
+    print("🤖 Bot activo con WebDriver Manager en Ubuntu PRoot...")
     app.run_polling(bootstrap_retries=-1)
 
 

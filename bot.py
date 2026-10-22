@@ -639,15 +639,38 @@ def consultar_ivss(cedula: str):
 
 
 # ==============================================================================
-# FUNCIÓN CENTRAL DE EXTRACCIÓN DETALLADA (SENIAT - REQUESTS & BS4)
+# FUNCIÓN CENTRAL DE EXTRACCIÓN CORREGIDA (SENIAT - REQUESTS & BS4)
 # ==============================================================================
 def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str):
     try:
-        url_login = "http://contribuyente.seniat.gob.ve/rifconsulta/login.do"
-        seniat_session.get(url_login, timeout=12, verify=False)
+        url_inicio_consulta = "http://contribuyente.seniat.gob.ve/rifconsulta/login.do"
+        seniat_session.get(url_inicio_consulta, timeout=12, verify=False)
 
-        payload_busqueda = {"rif": target_val} if tipo_consulta == "RIF" else {"cedula": f"V{target_val}"}
-        resp_busqueda = seniat_session.post("http://contribuyente.seniat.gob.ve/rifconsulta/login.do", data=payload_busqueda, timeout=15, verify=False)
+        if tipo_consulta == "RIF":
+            payload_busqueda = {
+                "rif": target_val,
+                "cedula": "",
+                "buscar": "Buscar"
+            }
+        else:
+            payload_busqueda = {
+                "rif": "",
+                "cedula": target_val,
+                "buscar": "Buscar"
+            }
+
+        headers_busqueda = {
+            "Referer": url_inicio_consulta,
+            "Content-Type": "application/x-www-form-urlencoded"
+        }
+
+        resp_busqueda = seniat_session.post(
+            url_inicio_consulta,
+            data=payload_busqueda,
+            headers=headers_busqueda,
+            timeout=15,
+            verify=False
+        )
         
         soup = BeautifulSoup(resp_busqueda.text, "html.parser")
         
@@ -657,13 +680,14 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str):
                 exp_link = a["href"]
                 break
         
-        if not exp_link:
-            return None
-
-        if not exp_link.startswith("http"):
-            exp_link = "http://contribuyente.seniat.gob.ve/rifconsulta/" + exp_link.lstrip("/")
-
-        seniat_session.get(exp_link, timeout=12, verify=False)
+        if exp_link:
+            if not exp_link.startswith("http"):
+                exp_link = "http://contribuyente.seniat.gob.ve/rifconsulta/" + exp_link.lstrip("/")
+            seniat_session.get(exp_link, timeout=12, verify=False)
+        else:
+            resp_test = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosbasicos.do", timeout=10, verify=False)
+            if "nombre" not in resp_test.text.lower():
+                return None
 
         dir_info = []
         try:
@@ -934,7 +958,7 @@ async def ejecutar_consulta_rif(target_val: str, tipo_consulta: str, update: Upd
 
 
 # ==============================================================================
-# MANEJADOR DE LOGIN Y CAPTCHA MEDIANTE REQUESTS (HTTP) - ACTUALIZADO
+# MANEJADOR DE LOGIN Y CAPTCHA MEDIANTE REQUESTS (HTTP)
 # ==============================================================================
 def verificar_o_iniciar_sesion_sync():
     global _last_successful_login

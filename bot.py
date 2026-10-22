@@ -8,12 +8,6 @@ from datetime import datetime
 import requests
 from bs4 import BeautifulSoup
 
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.common.by import By
-from webdriver_manager.chrome import ChromeDriverManager
-
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -48,7 +42,7 @@ logger = logging.getLogger(__name__)
 ESPERANDO_CAPTCHA = 1
 
 # Constantes SENIAT & Telegram
-TELEGRAM_BOT_TOKEN = "8648857231:AAFGoIk7Vslkj7Av8aaLHLJqzSQka0qN6Lo"
+TELEGRAM_TOKEN = "8648857231:AAFGoIk7Vslkj7Av8aaLHLJqzSQka0qN6Lo"
 SENIAT_USER = "v9684209"
 SENIAT_PASS = "v9684209"
 
@@ -59,8 +53,8 @@ ADMIN_USER_ID = 2098655970
 USERS_FILE = "authorized_users.txt"
 LOGS_FILE = "consultas_logs.txt"
 
-# Variables globales para control del navegador Selenium
-driver = None
+# Sesión HTTP global para manejar cookies del SENIAT
+seniat_session = requests.Session()
 _last_login_time = 0
 SESSION_MAX_AGE = 25 * 60  # 25 minutos
 
@@ -481,7 +475,7 @@ def generar_documento_pdf(
 
 
 # ==============================================================================
-# CONSULTAS PÚBLICAS (SENIAT PÚBLICO e IVSS)
+# CONSULTAS PÚBLICAS Y HTTP (SENIAT E IVSS)
 # ==============================================================================
 def consultar_seniat_y_nombre(cedula: str):
     url = f"http://contribuyente.seniat.gob.ve/relacionesrif/inicioConsulta.do?personalidad=1&ci={cedula}"
@@ -611,72 +605,70 @@ def consultar_ivss(cedula: str):
 
 
 # ==============================================================================
-# MOTOR SELENIUM (OPTIMIZADO PARA PROOT / ARM64)
+# GESTIÓN HTTP PURA (SIN SELENIUM)
 # ==============================================================================
-def inicializar_driver():
-    global driver
-    if not driver:
-        options = Options()
-        options.add_argument("--headless=new")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--disable-gpu")
-        options.add_argument("--disable-setuid-sandbox")
-        options.add_argument("--no-zygote")
-        options.add_argument("--single-process")
-        options.add_argument("--disable-accelerated-2d-canvas")
-        options.add_argument("--disable-infobars")
-        
-        try:
-            service = Service(ChromeDriverManager().install())
-            driver = webdriver.Chrome(service=service, options=options)
-        except Exception as e:
-            logger.error(f"Error crítico al iniciar Chrome/ChromeDriver con WebDriverManager: {e}")
-            raise e
-
-
-def verificar_o_iniciar_sesion_selenium():
-    global driver, _last_login_time
-    try:
-        inicializar_driver()
-    except Exception as e:
-        logger.error(f"Fallo al inicializar driver en verificación: {e}")
-        return True, b""
-
+def verificar_o_iniciar_sesion_http():
+    global seniat_session, _last_login_time
     ahora = time.time()
+    
+    # Si la sesión sigue vigente por tiempo
     if (ahora - _last_login_time) < SESSION_MAX_AGE:
         try:
-            driver.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosbasicos.do")
-            time.sleep(2)
-            if "login" not in driver.current_url.lower():
+            r = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosbasicos.do", timeout=10)
+            if "login" not in r.url.lower():
                 return False, None
         except Exception:
             pass
 
     try:
-        driver.get("http://contribuyente.seniat.gob.ve/iseniatlogin/contribuyente.do")
-        time.sleep(2)
-        img_element = driver.find_element(By.XPATH, "//img[contains(@src, 'kapatch') or contains(@src, 'Kapatch')]")
-        captcha_bytes = img_element.screenshot_as_png
-        return True, captcha_bytes
+        # Cargar página de login para obtener cookies
+        login_url = "http://contribuyente.seniat.gob.ve/iseniatlogin/contribuyente.do"
+        seniat_session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+        resp = seniat_session.get(login_url, timeout=12)
+        
+        soup = BeautifulSoup(resp.text, "html.parser")
+        img_tag = soup.find("img", src=re.compile("kapatch|Kapatch", re.IGNORECASE))
+        
+        if img_tag and img_tag.get("src"):
+            src = img_tag["src"]
+            if not src.startswith("http"):
+                captcha_url = "http://contribuyente.seniat.gob.ve/iseniatlogin/" + src.lstrip("/")
+            else:
+                captcha_url = src
+                
+            img_resp = seniat_session.get(captcha_url, timeout=10)
+            if img_resp.status_code == 200 and len(img_resp.content) > 100:
+                return True, img_resp.content
+                
+        # Alternativa por si el src está en otro formato
+        img_alt = soup.find("img", src=re.compile("kaptcha", re.IGNORECASE))
+        if img_alt:
+            src = img_alt["src"]
+            captcha_url = "http://contribuyente.seniat.gob.ve/iseniatlogin/" + src.lstrip("/")
+            img_resp = seniat_session.get(captcha_url, timeout=10)
+            if img_resp.status_code == 200 and len(img_resp.content) > 100:
+                return True, img_resp.content
+
+        return True, b""
     except Exception as e:
-        logger.error(f"Error capturando el captcha: {e}")
+        logger.error(f"Error HTTP obteniendo captcha: {e}")
         return True, b""
 
 
-def login_con_captcha_selenium(codigo_captcha: str):
-    global driver, _last_login_time
+def login_con_captcha_http(codigo_captcha: str):
+    global seniat_session, _last_login_time
     try:
-        driver.get("http://contribuyente.seniat.gob.ve/iseniatlogin/contribuyente.do")
-        time.sleep(1)
-        driver.find_element(By.NAME, "usuario").send_keys(SENIAT_USER)
-        driver.find_element(By.NAME, "clave").send_keys(SENIAT_PASS)
-        driver.find_element(By.NAME, "kaptcha").send_keys(codigo_captcha)
-        driver.find_element(By.NAME, "buscar").click()
-        time.sleep(3)
-
-        contenido = driver.page_source.lower()
-        if "mensajeerror" in contenido or "incorrecto" in contenido or "inválido" in contenido:
+        login_url = "http://contribuyente.seniat.gob.ve/iseniatlogin/contribuyente.do"
+        payload = {
+            "usuario": SENIAT_USER,
+            "clave": SENIAT_PASS,
+            "kaptcha": codigo_captcha,
+            "buscar": "Entrar"
+        }
+        resp = seniat_session.post(login_url, data=payload, timeout=15)
+        contenido = resp.text.lower()
+        
+        if "mensajeerror" in contenido or "incorrecto" in contenido or "inválido" in contenido or "login" in resp.url.lower():
             return False, "Código Captcha incorrecto o credenciales rechazadas."
 
         _last_login_time = time.time()
@@ -685,34 +677,24 @@ def login_con_captcha_selenium(codigo_captcha: str):
         return False, str(e)
 
 
-def ejecutar_consulta_rif_selenium(target_val: str, tipo_consulta: str, rif_exacto: str = ""):
-    global driver
+def ejecutar_consulta_rif_http(target_val: str, tipo_consulta: str, rif_exacto: str = ""):
+    global seniat_session
     try:
-        driver.get("http://contribuyente.seniat.gob.ve/rifconsulta/login.do")
-        time.sleep(1)
-
         cedula_limpia = re.sub(r"\D", "", target_val)
         rif_usar = f"V{cedula_limpia}" if tipo_consulta == "CEDULA" else (rif_exacto if rif_exacto else target_val.strip())
 
-        rif_input = driver.find_element(By.NAME, "rif")
-        rif_input.clear()
-        rif_input.send_keys(rif_usar)
-        driver.find_element(By.NAME, "buscar").click()
-        time.sleep(2)
+        # Enviar búsqueda RIF/CI
+        busqueda_url = "http://contribuyente.seniat.gob.ve/rifconsulta/login.do"
+        seniat_session.post(busqueda_url, data={"rif": rif_usar, "buscar": "Consultar"}, timeout=15)
 
-        try:
-            exp_link = driver.find_element(By.XPATH, "//a[contains(@href, 'buscarexpediente.do')]")
-            exp_link.click()
-            time.sleep(2)
-        except Exception:
-            pass
+        # Ir a expediente
+        seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/buscarexpediente.do", timeout=15)
 
         # 1. DATOS BÁSICOS
         datos_basicos = {"nombre_razon": "NO INDICA", "fecha_nacimiento": "NO INDICA", "correo": "NO INDICA"}
         try:
-            driver.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosbasicos.do")
-            time.sleep(1)
-            soup_db = BeautifulSoup(driver.page_source, "html.parser")
+            r_db = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosbasicos.do", timeout=12)
+            soup_db = BeautifulSoup(r_db.text, "html.parser")
 
             for tr in soup_db.find_all("tr"):
                 texto_tr = tr.get_text(separator=" ", strip=True).upper()
@@ -734,14 +716,13 @@ def ejecutar_consulta_rif_selenium(target_val: str, tipo_consulta: str, rif_exac
                         val = td.get_text(strip=True)
                         if "@" in val: datos_basicos["correo"] = val
         except Exception as e:
-            logger.error(f"Error extrayendo datos básicos: {e}")
+            logger.error(f"Error extrayendo datos básicos HTTP: {e}")
 
         # 2. DIRECCIONES
         dir_info = []
         try:
-            driver.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosdirecciones.do?consultar=S")
-            time.sleep(1)
-            soup_dir = BeautifulSoup(driver.page_source, "html.parser")
+            r_dir = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosdirecciones.do?consultar=S", timeout=12)
+            soup_dir = BeautifulSoup(r_dir.text, "html.parser")
 
             for tr in soup_dir.find_all("tr"):
                 subts = tr.find_all(class_="tablaSubTitulo")
@@ -753,7 +734,7 @@ def ejecutar_consulta_rif_selenium(target_val: str, tipo_consulta: str, rif_exac
                         if lbl and val:
                             dir_info.append({"etiqueta": lbl, "valor": val.upper()})
         except Exception as e:
-            logger.error(f"Error extrayendo direcciones: {e}")
+            logger.error(f"Error extrayendo direcciones HTTP: {e}")
 
         cargas_familiares = []
         relaciones_empresa = []
@@ -761,9 +742,8 @@ def ejecutar_consulta_rif_selenium(target_val: str, tipo_consulta: str, rif_exac
         # 3. CARGAS FAMILIARES
         if tipo_consulta == "CEDULA":
             try:
-                driver.get("http://contribuyente.seniat.gob.ve/rifconsulta/datoscargasfamiliares.do")
-                time.sleep(1)
-                soup_cf = BeautifulSoup(driver.page_source, "html.parser")
+                r_cf = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datoscargasfamiliares.do", timeout=12)
+                soup_cf = BeautifulSoup(r_cf.text, "html.parser")
 
                 carga_links = []
                 for a in soup_cf.find_all("a", href=True):
@@ -774,9 +754,8 @@ def ejecutar_consulta_rif_selenium(target_val: str, tipo_consulta: str, rif_exac
                         carga_links.append((a.get_text(strip=True), href))
 
                 for parentesco, link_detalle in carga_links:
-                    driver.get(link_detalle)
-                    time.sleep(1)
-                    soup_det = BeautifulSoup(driver.page_source, "html.parser")
+                    r_det = seniat_session.get(link_detalle, timeout=10)
+                    soup_det = BeautifulSoup(r_det.text, "html.parser")
 
                     nombres, cedula_c, f_nac, inf_med = "NO INDICA", "NO INDICA", "NO INDICA", "NO INDICA"
                     for row in soup_det.find_all("tr"):
@@ -800,14 +779,13 @@ def ejecutar_consulta_rif_selenium(target_val: str, tipo_consulta: str, rif_exac
                         "nro_informe_medico": inf_med
                     })
             except Exception as e:
-                logger.error(f"Error extrayendo cargas familiares: {e}")
+                logger.error(f"Error extrayendo cargas familiares HTTP: {e}")
 
         # 4. RELACIONES / EMPRESAS
         if tipo_consulta == "RIF":
             try:
-                driver.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosrelaciones.do")
-                time.sleep(1)
-                soup_rel = BeautifulSoup(driver.page_source, "html.parser")
+                r_rel = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosrelaciones.do", timeout=12)
+                soup_rel = BeautifulSoup(r_rel.text, "html.parser")
 
                 for tr in soup_rel.find_all("tr", class_=["letrasLista", "tablaFilas"]):
                     tds = tr.find_all("td")
@@ -820,7 +798,7 @@ def ejecutar_consulta_rif_selenium(target_val: str, tipo_consulta: str, rif_exac
                             "fecha": cols[3] if len(cols) > 3 else "NO INDICA"
                         })
             except Exception as e:
-                logger.error(f"Error extrayendo relaciones: {e}")
+                logger.error(f"Error extrayendo relaciones HTTP: {e}")
 
         return {
             "dir_info": dir_info,
@@ -829,7 +807,7 @@ def ejecutar_consulta_rif_selenium(target_val: str, tipo_consulta: str, rif_exac
             "relaciones_empresa": relaciones_empresa
         }
     except Exception as e:
-        logger.error(f"Error crítico en Selenium scraper: {e}")
+        logger.error(f"Error crítico en HTTP scraper: {e}")
         return None
 
 
@@ -851,7 +829,7 @@ async def ejecutar_consulta_rif(target_val: str, tipo_consulta: str, update: Upd
         ivss_estructurado, res_ivss = await asyncio.to_thread(consultar_ivss, target_val_limpio)
         telefonos_registrados = await asyncio.to_thread(consultar_telefono_mysql, target_val_limpio)
 
-    resultado_dict = await asyncio.to_thread(ejecutar_consulta_rif_selenium, target_val_limpio, tipo_consulta, rif_exacto)
+    resultado_dict = await asyncio.to_thread(ejecutar_consulta_rif_http, target_val_limpio, tipo_consulta, rif_exacto)
 
     if not resultado_dict:
         try:
@@ -1047,11 +1025,11 @@ async def manejar_cedula_o_texto(update: Update, context: ContextTypes.DEFAULT_T
 
     registrar_log_consulta(user, parametro_busqueda, tipo_consulta)
 
-    msg_espera = await update.message.reply_text(f"🔄 Procesando consulta con Selenium (`{parametro_busqueda}`)...", parse_mode="Markdown")
+    msg_espera = await update.message.reply_text(f"🔄 Procesando consulta HTTP (`{parametro_busqueda}`)...", parse_mode="Markdown")
     
     async with consulta_lock:
         try:
-            necesita_login, captcha_bytes = await asyncio.to_thread(verificar_o_iniciar_sesion_selenium)
+            necesita_login, captcha_bytes = await asyncio.to_thread(verificar_o_iniciar_sesion_http)
 
             if necesita_login:
                 if not captcha_bytes:
@@ -1115,11 +1093,11 @@ async def recibir_captcha_y_consultar(update: Update, context: ContextTypes.DEFA
         await update.message.reply_text("⚠️ Sesión expirada. Envía la consulta nuevamente.")
         return ConversationHandler.END
 
-    msg_espera = await update.message.reply_text("🔄 Iniciando sesión en SENIAT vía Selenium...")
+    msg_espera = await update.message.reply_text("🔄 Validando sesión en SENIAT por HTTP...")
 
     async with consulta_lock:
         try:
-            exito, err_msg = await asyncio.to_thread(login_con_captcha_selenium, codigo_usuario)
+            exito, err_msg = await asyncio.to_thread(login_con_captcha_http, codigo_usuario)
 
             if not exito:
                 try:
@@ -1152,7 +1130,7 @@ async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("autorizar", cmd_autorizar))
     app.add_handler(CommandHandler("revocar", cmd_revocar))
@@ -1168,7 +1146,7 @@ def main():
 
     app.add_handler(conv_handler)
 
-    print("🤖 Bot activo con WebDriver Manager en Ubuntu PRoot...")
+    print("🤖 Bot activo con Motor HTTP Puro en Ubuntu PRoot...")
     app.run_polling(bootstrap_retries=-1)
 
 

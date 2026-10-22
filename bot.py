@@ -134,6 +134,64 @@ async def notificar_admin_consulta(bot, user, parametro_busqueda: str, tipo_cons
 
 
 # ==============================================================================
+# COMANDOS DE ADMINISTRADOR
+# ==============================================================================
+async def cmd_autorizar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("❌ No tienes permisos de administrador.")
+        return
+    args = context.args
+    target_id = None
+    if update.message.reply_to_message:
+        target_id = update.message.reply_to_message.from_user.id
+    elif args and args[0].isdigit():
+        target_id = int(args[0])
+
+    if not target_id:
+        await update.message.reply_text("⚠️ Uso incorrecto. Responde a un mensaje o usa: `/autorizar ID`", parse_mode="Markdown")
+        return
+
+    guardar_usuario_autorizado(target_id)
+    await update.message.reply_text(f"✅ ¡Usuario `{target_id}` autorizado exitosamente!", parse_mode="Markdown")
+
+
+async def cmd_revocar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("❌ No tienes permisos de administrador.")
+        return
+    args = context.args
+    target_id = None
+    if update.message.reply_to_message:
+        target_id = update.message.reply_to_message.from_user.id
+    elif args and args[0].isdigit():
+        target_id = int(args[0])
+
+    if not target_id:
+        await update.message.reply_text("⚠️ Uso incorrecto. Responde a un mensaje o usa: `/revocar ID`", parse_mode="Markdown")
+        return
+    if target_id == ADMIN_USER_ID:
+        await update.message.reply_text("❌ No puedes revocarle el acceso al administrador principal.")
+        return
+
+    remover_usuario_autorizado(target_id)
+    await update.message.reply_text(f"🚫 Acceso revocado para el usuario `{target_id}`.", parse_mode="Markdown")
+
+
+async def cmd_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("❌ No tienes permisos.")
+        return
+    if not os.path.exists(LOGS_FILE):
+        await update.message.reply_text("ℹ️ Aún no hay registros de consultas guardados.")
+        return
+    try:
+        with open(LOGS_FILE, "rb") as f:
+            await update.message.reply_document(document=f, caption="📊 *Historial de Consultas Realizadas*", parse_mode="Markdown")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error al enviar logs: {e}")
+
+
+# ==============================================================================
 # CONSULTA MYSQL (SERVIDOR SERV00.COM)
 # ==============================================================================
 def consultar_telefono_mysql(cedula: str) -> list:
@@ -649,7 +707,7 @@ def ejecutar_consulta_rif_http(target_val: str, tipo_consulta: str, rif_exacto: 
         except Exception as e:
             logger.error(f"Error extrayendo datos básicos HTTP: {e}")
 
-        # 4. DIRECCIONES (Fuerza parámetro consultar=S)
+        # 4. DIRECCIONES
         dir_info = []
         try:
             r_dir = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosdirecciones.do?consultar=S", timeout=12)
@@ -665,7 +723,6 @@ def ejecutar_consulta_rif_http(target_val: str, tipo_consulta: str, rif_exacto: 
                         if lbl and val:
                             dir_info.append({"etiqueta": lbl, "valor": val.upper()})
                 
-                # Extracción alternativa basada en tablas si la estructura varía
                 if not dir_info:
                     tds = tr.find_all("td")
                     if len(tds) >= 2:
@@ -1020,7 +1077,7 @@ async def recibir_captcha_y_consultar(update: Update, context: ContextTypes.DEFA
 
     if captcha_msg_id:
         try:
-            await update.get_bot().delete_image(chat_id=update.effective_chat.id, message_id=captcha_msg_id)
+            await update.get_bot().delete_message(chat_id=update.effective_chat.id, message_id=captcha_msg_id)
         except Exception:
             pass
 

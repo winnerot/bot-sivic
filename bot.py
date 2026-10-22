@@ -620,7 +620,7 @@ def consultar_ivss(cedula: str):
 
 
 # ==============================================================================
-# MOTOR HTTP COMPLETO DE SCRAPING DE EXPEDIENTE (CON TRAZAS DEBUG)
+# MOTOR HTTP COMPLETO DE SCRAPING DE EXPEDIENTE (CORREGIDO Y CON TRAZAS DEBUG)
 # ==============================================================================
 def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: str = ""):
     try:
@@ -628,7 +628,11 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: 
         resp_ini = seniat_session.get(url_inicio, timeout=12, verify=False)
         print(f"[DEBUG] Acceso a login.do -> Status: {resp_ini.status_code}")
 
-        rif_usar = rif_exacto if rif_exacto else (target_val if tipo_consulta == "RIF" else f"V{target_val}")
+        # Corrección aplicada: Limpieza estricta y formato sin ceros adicionales
+        if tipo_consulta == "CEDULA":
+            rif_usar = f"V{target_val.strip()}"
+        else:
+            rif_usar = rif_exacto if rif_exacto else target_val.strip()
 
         payload = {
             "rif": rif_usar,
@@ -643,7 +647,7 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: 
 
         url_expediente = None
         for a in soup_b.find_all("a", href=True):
-            if "buscarexpediente.do" in a["href"]:
+            if "buscarexpediente.do" in a["href"] or "idContribuyente" in a["href"] or "rif=" in a["href"]:
                 url_expediente = a["href"]
                 if not url_expediente.startswith("http"):
                     url_expediente = "http://contribuyente.seniat.gob.ve/rifconsulta/" + url_expediente.lstrip("/")
@@ -654,6 +658,9 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: 
         if url_expediente:
             resp_exp = seniat_session.get(url_expediente, headers={"Referer": url_inicio}, timeout=12, verify=False)
             print(f"[DEBUG] Visita a expediente -> Status: {resp_exp.status_code}")
+        else:
+            fallback_url = f"http://contribuyente.seniat.gob.ve/rifconsulta/buscarexpediente.do?rif={rif_usar}"
+            seniat_session.get(fallback_url, headers={"Referer": url_inicio}, timeout=12, verify=False)
 
         ref_expediente = url_expediente if url_expediente else "http://contribuyente.seniat.gob.ve/rifconsulta/buscarexpediente.do"
 
@@ -663,7 +670,6 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: 
             resp_db = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosbasicos.do", headers={"Referer": ref_expediente}, timeout=12, verify=False)
             print(f"[DEBUG] Datos Básicos URL -> Status: {resp_db.status_code}")
             soup_db = BeautifulSoup(resp_db.text, "html.parser")
-            print(f"[DEBUG] HTML Datos Básicos (primeros 300 caracteres): {resp_db.text[:300]}...")
 
             for tr in soup_db.find_all("tr"):
                 texto_tr = tr.get_text(separator=" ", strip=True).upper()

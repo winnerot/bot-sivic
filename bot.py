@@ -643,7 +643,6 @@ def consultar_ivss(cedula: str):
 # ==============================================================================
 def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str):
     try:
-        # 1. Ingreso a consulta principal de RIF
         url_login = "http://contribuyente.seniat.gob.ve/rifconsulta/login.do"
         seniat_session.get(url_login, timeout=12, verify=False)
 
@@ -652,7 +651,6 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str):
         
         soup = BeautifulSoup(resp_busqueda.text, "html.parser")
         
-        # Buscar enlace de expediente
         exp_link = None
         for a in soup.find_all("a", href=True):
             if "buscarexpediente.do" in a["href"]:
@@ -667,7 +665,6 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str):
 
         seniat_session.get(exp_link, timeout=12, verify=False)
 
-        # 2. Domicilio Fiscal
         dir_info = []
         try:
             resp_dir = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosdirecciones.do?consultar=S", timeout=12, verify=False)
@@ -685,7 +682,6 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str):
         except Exception as e:
             logger.error(f"Error parseando direcciones: {e}")
 
-        # 3. Datos Básicos
         datos_basicos = {"nombre_razon": "NO INDICA", "fecha_nacimiento": "NO INDICA", "correo": "NO INDICA"}
         try:
             resp_basicos = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosbasicos.do", timeout=12, verify=False)
@@ -726,7 +722,6 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str):
         cargas_familiares = []
         relaciones_empresa = []
 
-        # 4. Cargas Familiares (si es Cédula)
         if tipo_consulta == "CEDULA":
             try:
                 resp_carga = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datoscargasfamiliares.do", timeout=12, verify=False)
@@ -768,7 +763,6 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str):
             except Exception as e:
                 logger.error(f"Error parseando cargas familiares: {e}")
 
-        # 5. Relaciones de Empresa (si es RIF)
         if tipo_consulta == "RIF":
             try:
                 resp_rel = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosrelaciones.do", timeout=12, verify=False)
@@ -940,7 +934,7 @@ async def ejecutar_consulta_rif(target_val: str, tipo_consulta: str, update: Upd
 
 
 # ==============================================================================
-# MANEJADOR DE LOGIN Y CAPTCHA MEDIANTE REQUESTS (HTTP)
+# MANEJADOR DE LOGIN Y CAPTCHA MEDIANTE REQUESTS (HTTP) - ACTUALIZADO
 # ==============================================================================
 def verificar_o_iniciar_sesion_sync():
     global _last_successful_login
@@ -948,7 +942,11 @@ def verificar_o_iniciar_sesion_sync():
 
     if tiempo_transcurrido < SESSION_DURATION:
         try:
-            test_resp = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosbasicos.do", timeout=10, verify=False)
+            test_resp = seniat_session.get(
+                "http://contribuyente.seniat.gob.ve/rifconsulta/datosbasicos.do",
+                timeout=10,
+                verify=False
+            )
             if test_resp.status_code == 200 and "login" not in test_resp.url.lower():
                 return False, None  # Sesión activa
         except Exception:
@@ -972,7 +970,8 @@ def verificar_o_iniciar_sesion_sync():
         else:
             captcha_url = "http://contribuyente.seniat.gob.ve/iseniatlogin/" + src.lstrip("/")
         
-        cap_resp = seniat_session.get(captcha_url, timeout=10, verify=False)
+        headers_captcha = {"Referer": login_url}
+        cap_resp = seniat_session.get(captcha_url, headers=headers_captcha, timeout=10, verify=False)
         return True, cap_resp.content
 
     return True, b""
@@ -980,30 +979,28 @@ def verificar_o_iniciar_sesion_sync():
 
 def login_con_captcha_sync(codigo_captcha: str):
     global _last_successful_login
-    login_action_url = "http://contribuyente.seniat.gob.ve/iseniatlogin/contribuyente.do"
+    login_action_url = "http://contribuyente.seniat.gob.ve/iseniatlogin/login.do"
+    referer_url = "http://contribuyente.seniat.gob.ve/iseniatlogin/contribuyente.do"
     
     payload = {
         "usuario": SENIAT_USER,
         "clave": SENIAT_PASS,
-        "kaptcha": codigo_captcha
+        "kaptcha": codigo_captcha,
+        "buscar": "Aceptar"
     }
     
-    resp_get = seniat_session.get(login_action_url, timeout=15, verify=False)
-    soup = BeautifulSoup(resp_get.text, "html.parser")
-    form = soup.find("form")
-    if form:
-        for input_tag in form.find_all("input"):
-            name = input_tag.get("name")
-            val = input_tag.get("value", "")
-            if name and name not in payload:
-                payload[name] = val
+    headers = {
+        "Referer": referer_url,
+        "Content-Type": "application/x-www-form-urlencoded"
+    }
 
-    resp_post = seniat_session.post(login_action_url, data=payload, timeout=20, verify=False)
+    resp_post = seniat_session.post(login_action_url, data=payload, headers=headers, timeout=20, verify=False)
     resp_text = resp_post.text.lower()
     
-    if "incorrecto" in resp_text or "error" in resp_text or "invalido" in resp_text:
+    if "mensajeerror" in resp_text or "incorrecto" in resp_text or "inválido" in resp_text:
+        soup = BeautifulSoup(resp_post.text, "html.parser")
         err_div = soup.find(id="mensajeError")
-        err_txt = err_div.get_text(strip=True) if err_div else "Captcha incorrecto o credenciales inválidas"
+        err_txt = err_div.get_text(strip=True) if err_div else "Código captcha incorrecto o datos no válidos"
         return False, err_txt
 
     _last_successful_login = time.time()

@@ -10,6 +10,7 @@ from bs4 import BeautifulSoup
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 
 from telegram import Update
@@ -609,7 +610,7 @@ def consultar_ivss(cedula: str):
 
 
 # ==============================================================================
-# MOTOR SELENIUM PARA EXPEDIENTE SENIAT
+# MOTOR SELENIUM FORZADO A RUTA LOCAL (UBUNTU PROOT)
 # ==============================================================================
 def inicializar_driver():
     global driver
@@ -622,8 +623,24 @@ def inicializar_driver():
         options.add_argument("--remote-debugging-port=0")
         options.add_argument("--disable-software-rasterizer")
         
+        # Rutas absolutas del chromedriver instalado vía apt en Ubuntu PRoot
+        rutas_driver = [
+            "/usr/bin/chromedriver",
+            "/usr/lib/chromium-browser/chromedriver",
+            "/usr/lib/chromium/chromedriver"
+        ]
+        
+        service = None
+        for ruta in rutas_driver:
+            if os.path.exists(ruta):
+                service = Service(executable_path=ruta)
+                break
+                
         try:
-            driver = webdriver.Chrome(options=options)
+            if service:
+                driver = webdriver.Chrome(service=service, options=options)
+            else:
+                driver = webdriver.Chrome(options=options)
         except Exception as e:
             logger.error(f"Error crítico al iniciar Chrome/ChromeDriver: {e}")
             raise e

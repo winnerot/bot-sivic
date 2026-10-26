@@ -6,6 +6,7 @@ import time
 import re
 from datetime import datetime
 import requests
+import mechanicalsoup
 from bs4 import BeautifulSoup
 from telegram import Update
 from telegram.ext import (
@@ -60,18 +61,25 @@ LOGS_FILE = "consultas_logs.txt"
 SESSION_DURATION = 30 * 60  # 30 minutos en segundos
 _last_successful_login = 0
 
-# Sesión HTTP persistente
-seniat_session = requests.Session()
-seniat_session.headers.update({
+# Sesión HTTP persistente usando MechanicalSoup (StatefulBrowser)
+browser = mechanicalsoup.StatefulBrowser(
+    soup_config={'features': 'html.parser'},
+    raise_on_404=False
+)
+browser.session.headers.update({
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
     "Accept-Language": "es-ES,es;q=0.9,en;q=0.8"
 })
+browser.session.verify = False
 
 retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504], allowed_methods=["GET", "POST"])
 adapter = HTTPAdapter(max_retries=retries)
-seniat_session.mount("http://", adapter)
-seniat_session.mount("https://", adapter)
+browser.session.mount("http://", adapter)
+browser.session.mount("https://", adapter)
+
+# Mantenemos requests separado por compatibilidad con IVSS y MySQL
+seniat_session = browser.session
 
 consulta_lock = asyncio.Lock()
 
@@ -495,7 +503,7 @@ def generar_documento_pdf(
 def consultar_seniat_y_nombre(cedula: str):
     url = f"http://contribuyente.seniat.gob.ve/relacionesrif/inicioConsulta.do?personalidad=1&ci={cedula}"
     try:
-        response = seniat_session.get(url, timeout=12, verify=False)
+        response = browser.session.get(url, timeout=12, verify=False)
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, "html.parser")
             texto_total = soup.get_text(separator=" ", strip=True)
@@ -620,66 +628,78 @@ def consultar_ivss(cedula: str):
 
 
 # ==============================================================================
-# MOTOR HTTP COMPLETO DE EXPEDIENTE (SIMULACIÓN DE CLICS Y NAVEGACIÓN PASO A PASO)
+# MOTOR MECHANICALSOUP: SIMULACIÓN DE NAVEGACIÓN Y CLIC EN ENLACES/FORMULARIOS
 # ==============================================================================
 def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: str = ""):
     try:
-        # PASO 1: Recargar la URL base de consulta con la sesión activa
+        # 1. Abrir la URL base de consulta del SENIAT con el navegador de MechanicalSoup
         url_home = "https://contribuyente.seniat.gob.ve/rifconsulta/"
-        resp_home = seniat_session.get(url_home, timeout=12, verify=False)
-        print(f"[DEBUG] Carga de home rifconsulta -> Status: {resp_home.status_code}")
+        browser.open(url_home)
+        print(f"[DEBUG] MechanicalSoup abrió la home -> URL actual: {browser.get_url()}")
 
         cedula_limpia = re.sub(r"\D", "", target_val)
         if tipo_consulta == "CEDULA":
             rif_usar = f"V{cedula_limpia}"
-            payload_buscar = {
-                "cedula": cedula_limpia,
-                "rif": "",
-                "buscar": "Buscar"
-            }
+            campo_llenar = cedula_limpia
         else:
             rif_usar = rif_exacto if rif_exacto else target_val.strip()
-            payload_buscar = {
-                "cedula": "",
-                "rif": rif_usar,
-                "buscar": "Buscar"
-            }
+            campo_llenar = rif_usar
 
-        # PASO 2: Simular el clic en el botón BUSCAR enviando el formulario con la cédula
-        url_login_do = "http://contribuyente.seniat.gob.ve/rifconsulta/login.do"
-        resp_busqueda = seniat_session.post(
-            url_login_do, 
-            data=payload_buscar, 
-            headers={"Referer": url_home, "Content-Type": "application/x-www-form-urlencoded"}, 
-            timeout=15, 
-            verify=False
-        )
-        print(f"[DEBUG] POST Buscar cédula/rif -> Status: {resp_busqueda.status_code}")
+        # 2. Seleccionar el formulario de búsqueda y rellenar el campo de cédula o rif
+        # MechanicalSoup busca el formulario automáticamente en la página
+        form_encontrado = False
+        try:
+            browser.select_form("form") # Selecciona el formulario principal
+            form_encontrado = True
+        except Exception:
+            # Si no encuentra un formulario por defecto, probamos seleccionando por acción o índice
+            for f in browser.get_current_page().find_all("form"):
+                if "login.do" in f.get("action", "") or f.find("input", {"name": ["cedula", "rif"]}):
+                    browser.select_form(form=f)
+                    form_encontrado = True
+                    break
 
-        soup_b = BeautifulSoup(resp_busqueda.text, "html.parser")
+        if form_encontrado:
+            # Llenamos los inputs del formulario
+            if tipo_consulta == "CEDULA":
+                browser["cedula"] = campo_llenar
+                browser["rif"] = ""
+            else:
+                browser["rif"] = campo_llenar
+                browser["cedula"] = ""
+            
+            # 3. Simular clic en el botón "Buscar" enviando el formulario seleccionado
+            response_busqueda = browser.submit_selected(btnName="buscar")
+            print(f"[DEBUG] Envío de formulario (Clic en Buscar) -> Status: {response_busqueda.status_code}")
+        else:
+            # Fallback manual por peticiones si el formulario no se deja manipular
+            payload = {"cedula": cedula_limpia if tipo_consulta == "CEDULA" else "", "rif": rif_usar if tipo_consulta == "RIF" else "", "buscar": "Buscar"}
+            browser.post("http://contribuyente.seniat.gob.ve/rifconsulta/login.do", data=payload)
 
-        # PASO 3: Buscar las "letras azules" (el enlace con el expediente del contribuyente)
-        url_expediente = None
+        soup_b = browser.get_current_page()
+
+        # 4. Simular clic en las "letras azules" (el enlace del expediente del contribuyente)
+        # MechanicalSoup permite seguir enlaces buscando por texto parcial o atributos de forma muy limpia
+        enlace_expediente = None
         for a in soup_b.find_all("a", href=True):
             href = a["href"]
             if any(k in href for k in ["buscarexpediente.do", "idContribuyente", "rif="]):
-                if not href.startswith("http"):
-                    url_expediente = "http://contribuyente.seniat.gob.ve/rifconsulta/" + href.lstrip("/")
-                else:
-                    url_expediente = href
+                enlace_expediente = href
                 break
 
-        print(f"[DEBUG] Enlace azul del expediente encontrado: {url_expediente}")
+        print(f"[DEBUG] Enlace azul del expediente detectado: {enlace_expediente}")
 
-        if not url_expediente:
-            url_expediente = f"http://contribuyente.seniat.gob.ve/rifconsulta/buscarexpediente.do?rif={rif_usar}"
+        if enlace_expediente:
+            # Simular clic en el enlace azul del expediente
+            browser.follow_link(enlace_expediente)
+        else:
+            fallback_url = f"http://contribuyente.seniat.gob.ve/rifconsulta/buscarexpediente.do?rif={rif_usar}"
+            browser.open(fallback_url)
 
-        # Entrar a la página principal del expediente
-        resp_exp = seniat_session.get(url_expediente, headers={"Referer": url_login_do}, timeout=12, verify=False)
-        soup_exp = BeautifulSoup(resp_exp.text, "html.parser")
-        print(f"[DEBUG] Entrada al expediente principal -> Status: {resp_exp.status_code}")
+        soup_exp = browser.get_current_page()
+        print(f"[DEBUG] Página de expediente actual -> URL: {browser.get_url()}")
 
-        # 1. DATOS BÁSICOS
+        # 5. DATOS BÁSICOS
         datos_basicos = {"nombre_razon": "NO INDICA", "fecha_nacimiento": "NO INDICA", "correo": "NO INDICA"}
         try:
             for tr in soup_exp.find_all("tr"):
@@ -704,14 +724,15 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: 
         except Exception as e:
             print(f"[ERROR] Excepción en datos básicos: {e}")
 
-        # PASO 4: Clic en el menú de Direcciones / DOMICILIO FISCAL
+        # 6. Simular clic en el menú "DOMICILIO FISCAL / Direcciones"
         dir_info = []
         try:
+            # Buscamos el enlace del menú que lleva a direcciones o abrimos la ruta manteniendo la sesión del navegador
             url_dir = "http://contribuyente.seniat.gob.ve/rifconsulta/datosdirecciones.do?consultar=S"
-            resp_dir = seniat_session.get(url_dir, headers={"Referer": url_expediente}, timeout=12, verify=False)
-            print(f"[DEBUG] Clic en Domicilio Fiscal / Direcciones -> Status: {resp_dir.status_code}")
+            browser.open(url_dir)
+            print(f"[DEBUG] Navegación a Domicilio Fiscal -> Status: {browser.response.status_code}")
             
-            soup_dir = BeautifulSoup(resp_dir.text, "html.parser")
+            soup_dir = browser.get_current_page()
             
             for tr in soup_dir.find_all("tr"):
                 tds = tr.find_all("td")
@@ -728,12 +749,12 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: 
         cargas_familiares = []
         relaciones_empresa = []
 
-        # PASO 5: Cargas Familiares (si aplica para cédula)
+        # 7. Cargas Familiares (si aplica para cédula)
         if tipo_consulta == "CEDULA":
             try:
                 url_cf = "http://contribuyente.seniat.gob.ve/rifconsulta/datoscargasfamiliares.do"
-                resp_cf = seniat_session.get(url_cf, headers={"Referer": url_expediente}, timeout=12, verify=False)
-                soup_cf = BeautifulSoup(resp_cf.text, "html.parser")
+                browser.open(url_cf)
+                soup_cf = browser.get_current_page()
                 
                 for table in soup_cf.find_all("table"):
                     for row in table.find_all("tr"):
@@ -768,8 +789,8 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: 
         if tipo_consulta == "RIF":
             try:
                 url_rel = "http://contribuyente.seniat.gob.ve/rifconsulta/datosrelaciones.do"
-                resp_rel = seniat_session.get(url_rel, headers={"Referer": url_expediente}, timeout=12, verify=False)
-                soup_rel = BeautifulSoup(resp_rel.text, "html.parser")
+                browser.open(url_rel)
+                soup_rel = browser.get_current_page()
                 
                 for tr in soup_rel.find_all("tr", class_=["letrasLista", "tablaFilas"]):
                     tds = tr.find_all("td")
@@ -941,7 +962,7 @@ async def ejecutar_consulta_rif(target_val: str, tipo_consulta: str, update: Upd
 
 
 # ==============================================================================
-# MANEJADOR DE LOGIN Y CAPTCHA MEDIANTE REQUESTS (HTTP)
+# MANEJADOR DE LOGIN Y CAPTCHA MEDIANTE MECHANICALSOUP
 # ==============================================================================
 def verificar_o_iniciar_sesion_sync():
     global _last_successful_login
@@ -949,19 +970,15 @@ def verificar_o_iniciar_sesion_sync():
 
     if tiempo_transcurrido < SESSION_DURATION:
         try:
-            test_resp = seniat_session.get(
-                "http://contribuyente.seniat.gob.ve/rifconsulta/datosbasicos.do",
-                timeout=10,
-                verify=False
-            )
-            if test_resp.status_code == 200 and "login" not in test_resp.url.lower():
+            browser.open("http://contribuyente.seniat.gob.ve/rifconsulta/datosbasicos.do")
+            if browser.response.status_code == 200 and "login" not in browser.get_url().lower():
                 return False, None
         except Exception:
             pass
 
     login_url = "http://contribuyente.seniat.gob.ve/iseniatlogin/contribuyente.do"
-    resp = seniat_session.get(login_url, timeout=15, verify=False)
-    soup = BeautifulSoup(resp.text, "html.parser")
+    browser.open(login_url)
+    soup = browser.get_current_page()
     
     img_tag = soup.find("img", src=re.compile("kapatch", re.IGNORECASE))
     if not img_tag:
@@ -977,8 +994,7 @@ def verificar_o_iniciar_sesion_sync():
         else:
             captcha_url = "http://contribuyente.seniat.gob.ve/iseniatlogin/" + src.lstrip("/")
         
-        headers_captcha = {"Referer": login_url}
-        cap_resp = seniat_session.get(captcha_url, headers=headers_captcha, timeout=10, verify=False)
+        cap_resp = browser.session.get(captcha_url, headers={"Referer": login_url}, timeout=10, verify=False)
         return True, cap_resp.content
 
     return True, b""
@@ -987,21 +1003,23 @@ def verificar_o_iniciar_sesion_sync():
 def login_con_captcha_sync(codigo_captcha: str):
     global _last_successful_login
     login_action_url = "http://contribuyente.seniat.gob.ve/iseniatlogin/login.do"
-    referer_url = "http://contribuyente.seniat.gob.ve/iseniatlogin/contribuyente.do"
     
-    payload = {
-        "usuario": SENIAT_USER,
-        "clave": SENIAT_PASS,
-        "kaptcha": codigo_captcha,
-        "buscar": "Aceptar"
-    }
-    
-    headers = {
-        "Referer": referer_url,
-        "Content-Type": "application/x-www-form-urlencoded"
-    }
+    try:
+        browser.open("http://contribuyente.seniat.gob.ve/iseniatlogin/contribuyente.do")
+        browser.select_form("form")
+        browser["usuario"] = SENIAT_USER
+        browser["clave"] = SENIAT_PASS
+        browser["kaptcha"] = codigo_captcha
+        resp_post = browser.submit_selected(btnName="buscar")
+    except Exception:
+        payload = {
+            "usuario": SENIAT_USER,
+            "clave": SENIAT_PASS,
+            "kaptcha": codigo_captcha,
+            "buscar": "Aceptar"
+        }
+        resp_post = browser.session.post(login_action_url, data=payload, timeout=20, verify=False)
 
-    resp_post = seniat_session.post(login_action_url, data=payload, headers=headers, timeout=20, verify=False)
     resp_text = resp_post.text.lower()
     
     if "mensajeerror" in resp_text or "incorrecto" in resp_text or "inválido" in resp_text:
@@ -1196,7 +1214,7 @@ def main():
 
     app.add_handler(conv_handler)
 
-    print("🤖 Bot activo con Requests y BeautifulSoup en Termux (Android)...")
+    print("🤖 Bot activo con MechanicalSoup en Termux (Android)...")
     app.run_polling(bootstrap_retries=-1)
 
 

@@ -20,7 +20,6 @@ from telegram.ext import (
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
 import urllib3
-
 # Librería para generar el PDF Profesional
 from reportlab.lib.pagesizes import letter
 from reportlab.lib import colors

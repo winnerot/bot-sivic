@@ -620,7 +620,7 @@ def consultar_ivss(cedula: str):
 
 
 # ==============================================================================
-# MOTOR HTTP COMPLETO DE SCRAPING DE EXPEDIENTE (REPARADO DEFINITIVAMENTE)
+# MOTOR HTTP COMPLETO DE SCRAPING DE EXPEDIENTE (REPARADO Y CORREGIDO)
 # ==============================================================================
 def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: str = ""):
     try:
@@ -628,7 +628,6 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: 
         resp_ini = seniat_session.get(url_inicio, timeout=12, verify=False)
         print(f"[DEBUG] Acceso a login.do -> Status: {resp_ini.status_code}")
 
-        # REPARACIÓN DÍGITOS: No cortar la cédula bajo ninguna circunstancia
         cedula_limpia = re.sub(r"\D", "", target_val)
         if tipo_consulta == "CEDULA":
             rif_usar = f"V{cedula_limpia}"
@@ -694,7 +693,7 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: 
         except Exception as e:
             print(f"[ERROR] Excepción en datos básicos: {e}")
 
-        # 2. DIRECCIONES
+        # 2. DIRECCIONES (CORREGIDO Y ROBUSTO)
         dir_info = []
         try:
             resp_dir = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datosdirecciones.do?consultar=S", headers={"Referer": ref_expediente}, timeout=12, verify=False)
@@ -702,14 +701,12 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: 
             soup_dir = BeautifulSoup(resp_dir.text, "html.parser")
             
             for tr in soup_dir.find_all("tr"):
-                subts = tr.find_all(class_="tablaSubTitulo")
-                smalls = tr.find_all(class_="letrasSmall")
-                if subts and smalls:
-                    for st, sm in zip(subts, smalls):
-                        lbl = st.get_text(strip=True).replace("\u00a0", " ")
-                        val = sm.get_text(strip=True).replace("\u00a0", " ")
-                        if lbl and val:
-                            dir_info.append({"etiqueta": lbl, "valor": val.upper()})
+                tds = tr.find_all("td")
+                if len(tds) >= 2:
+                    lbl = tds[0].get_text(strip=True).replace(":", "").replace("\u00a0", " ")
+                    val = tds[1].get_text(strip=True).replace("\u00a0", " ")
+                    if lbl and val and val != ":" and len(lbl) < 35:
+                        dir_info.append({"etiqueta": lbl, "valor": val.upper()})
             print(f"[DEBUG] Direcciones encontradas: {len(dir_info)}")
         except Exception as e:
             print(f"[ERROR] Excepción en direcciones: {e}")
@@ -717,48 +714,38 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: 
         cargas_familiares = []
         relaciones_empresa = []
 
-        # 3. CARGAS FAMILIARES
+        # 3. CARGAS FAMILIARES (CORREGIDO Y ROBUSTO)
         if tipo_consulta == "CEDULA":
             try:
                 resp_cf = seniat_session.get("http://contribuyente.seniat.gob.ve/rifconsulta/datoscargasfamiliares.do", headers={"Referer": ref_expediente}, timeout=12, verify=False)
                 print(f"[DEBUG] Cargas Familiares URL -> Status: {resp_cf.status_code}")
                 soup_cf = BeautifulSoup(resp_cf.text, "html.parser")
                 
-                carga_links = []
-                for a in soup_cf.find_all("a", href=True):
-                    if "consultar=S&idCarga=" in a["href"]:
-                        href = a["href"]
-                        if not href.startswith("http"):
-                            href = "http://contribuyente.seniat.gob.ve/rifconsulta/" + href.lstrip("/")
-                        carga_links.append((a.get_text(strip=True), href))
+                for table in soup_cf.find_all("table"):
+                    for row in table.find_all("tr"):
+                        cols = row.find_all("td")
+                        if len(cols) >= 4:
+                            col_texts = [c.get_text(strip=True) for c in cols]
+                            texto_fila = " ".join(col_texts).upper()
+                            if "PARENTESCO" in texto_fila or "APELLIDOS" in texto_fila or not col_texts[0]:
+                                continue
 
-                print(f"[DEBUG] Enlaces de cargas familiares encontrados: {len(carga_links)}")
+                            parentesco = col_texts[0] if len(col_texts) > 0 else "N/A"
+                            nombres = col_texts[1] if len(col_texts) > 1 else "N/A"
+                            cedula_c = col_texts[2] if len(col_texts) > 2 else "N/A"
+                            f_nac = col_texts[3] if len(col_texts) > 3 else "N/A"
 
-                for parentesco, link_detalle in carga_links:
-                    resp_det = seniat_session.get(link_detalle, headers={"Referer": "http://contribuyente.seniat.gob.ve/rifconsulta/datoscargasfamiliares.do"}, timeout=10, verify=False)
-                    soup_det = BeautifulSoup(resp_det.text, "html.parser")
-                    
-                    nombres, cedula_c, f_nac, inf_med = "NO INDICA", "NO INDICA", "NO INDICA", "NO INDICA"
-                    for row in soup_det.find_all("tr"):
-                        cells = row.find_all("td")
-                        for c_idx, cell in enumerate(cells):
-                            lbl = cell.get_text(strip=True).upper()
-                            if row.find_next_sibling() and len(row.find_next_sibling().find_all("td")) > c_idx:
-                                val = row.find_next_sibling().find_all("td")[c_idx].get_text(strip=True)
-                                if "NOMBRES" in lbl and val and val != ":": nombres = val
-                                if ("CEDULA" in lbl or "C.I." in lbl) and val and val != ":": cedula_c = val
-                                if "FECHA DE NACIMIENTO" in lbl and val and val != ":": f_nac = val
-                                if "INFORME MEDICO" in lbl and val and val != ":": inf_med = val
-
-                    edad_c = calcular_edad(f_nac) if f_nac != "NO INDICA" else "No calculable"
-                    cargas_familiares.append({
-                        "parentesco": parentesco,
-                        "nombres": nombres,
-                        "cedula": cedula_c,
-                        "fecha_nacimiento": f_nac,
-                        "edad": edad_c,
-                        "nro_informe_medico": inf_med
-                    })
+                            if nombres != "N/A" and nombres != "":
+                                edad_c = calcular_edad(f_nac) if f_nac != "N/A" else "No calculable"
+                                cargas_familiares.append({
+                                    "parentesco": parentesco,
+                                    "nombres": nombres,
+                                    "cedula": cedula_c,
+                                    "fecha_nacimiento": f_nac,
+                                    "edad": edad_c,
+                                    "nro_informe_medico": "N/A"
+                                })
+                print(f"[DEBUG] Cargas familiares encontradas: {len(cargas_familiares)}")
             except Exception as e:
                 print(f"[ERROR] Excepción en cargas familiares: {e}")
 
@@ -804,7 +791,6 @@ async def ejecutar_consulta_rif(target_val: str, tipo_consulta: str, update: Upd
     ivss_estructurado, res_ivss = [], ""
     telefonos_registrados = []
     
-    # REPARACIÓN DÍGITOS: Garantizar la cédula intacta para consultas secundarias
     target_val_limpio = re.sub(r"\D", "", target_val)
 
     if tipo_consulta == "CEDULA":

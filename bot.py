@@ -78,9 +78,7 @@ adapter = HTTPAdapter(max_retries=retries)
 browser.session.mount("http://", adapter)
 browser.session.mount("https://", adapter)
 
-# Mantenemos requests separado por compatibilidad con IVSS y MySQL
 seniat_session = browser.session
-
 consulta_lock = asyncio.Lock()
 
 
@@ -628,7 +626,7 @@ def consultar_ivss(cedula: str):
 
 
 # ==============================================================================
-# MOTOR MECHANICALSOUP: SIMULACIÓN DE NAVEGACIÓN Y CLIC EN ENLACES/FORMULARIOS
+# MOTOR ROBUSTO DE EXPEDIENTE (MANTENIENDO MECHANICALSOUP + FALLBACK DIRECTO)
 # ==============================================================================
 def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: str = ""):
     try:
@@ -640,66 +638,80 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: 
         cedula_limpia = re.sub(r"\D", "", target_val)
         if tipo_consulta == "CEDULA":
             rif_usar = f"V{cedula_limpia}"
-            campo_llenar = cedula_limpia
+            payload_buscar = {
+                "cedula": cedula_limpia,
+                "rif": "",
+                "buscar": "Buscar"
+            }
         else:
             rif_usar = rif_exacto if rif_exacto else target_val.strip()
-            campo_llenar = rif_usar
+            payload_buscar = {
+                "cedula": "",
+                "rif": rif_usar,
+                "buscar": "Buscar"
+            }
 
-        # 2. Seleccionar el formulario de búsqueda y rellenar el campo de cédula o rif
-        # MechanicalSoup busca el formulario automáticamente en la página
-        form_encontrado = False
+        # 2. Intentar rellenar el formulario de forma segura o enviar mediante POST directo si falla el mapeo
+        form_enviado = False
         try:
-            browser.select_form("form") # Selecciona el formulario principal
-            form_encontrado = True
-        except Exception:
-            # Si no encuentra un formulario por defecto, probamos seleccionando por acción o índice
-            for f in browser.get_current_page().find_all("form"):
-                if "login.do" in f.get("action", "") or f.find("input", {"name": ["cedula", "rif"]}):
-                    browser.select_form(form=f)
-                    form_encontrado = True
-                    break
-
-        if form_encontrado:
-            # Llenamos los inputs del formulario
-            if tipo_consulta == "CEDULA":
-                browser["cedula"] = campo_llenar
-                browser["rif"] = ""
-            else:
-                browser["rif"] = campo_llenar
-                browser["cedula"] = ""
+            browser.select_form("form")
+            form = browser.get_current_form()
+            # Validar si los campos existen en el formulario antes de asignarlos
+            if form.find("input", {"name": "cedula"}):
+                browser["cedula"] = payload_buscar["cedula"]
+            if form.find("input", {"name": "rif"}):
+                browser["rif"] = payload_buscar["rif"]
             
-            # 3. Simular clic en el botón "Buscar" enviando el formulario seleccionado
             response_busqueda = browser.submit_selected(btnName="buscar")
-            print(f"[DEBUG] Envío de formulario (Clic en Buscar) -> Status: {response_busqueda.status_code}")
-        else:
-            # Fallback manual por peticiones si el formulario no se deja manipular
-            payload = {"cedula": cedula_limpia if tipo_consulta == "CEDULA" else "", "rif": rif_usar if tipo_consulta == "RIF" else "", "buscar": "Buscar"}
-            browser.post("http://contribuyente.seniat.gob.ve/rifconsulta/login.do", data=payload)
+            form_enviado = True
+            print(f"[DEBUG] Formulario enviado mediante submit_selected -> Status: {response_busqueda.status_code}")
+        except Exception as e:
+            print(f"[WARN] No se pudo enviar por formulario nativo ({e}), usando POST directo de respaldo...")
+
+        if not form_enviado:
+            url_login_do = "http://contribuyente.seniat.gob.ve/rifconsulta/login.do"
+            response_busqueda = browser.session.post(
+                url_login_do,
+                data=payload_buscar,
+                headers={"Referer": url_home, "Content-Type": "application/x-www-form-urlencoded"},
+                timeout=15,
+                verify=False
+            )
+            # Sincronizamos la respuesta en el estado del browser de MechanicalSoup
+            browser.open_auth(url_login_do) # Truco interno o simplemente procesamos el soup
+            # Alternativa segura para actualizar la página actual del browser
+            class DummyResponse:
+                def __init__(self, text, url, status_code):
+                    self.text = text
+                    self.url = url
+                    self.status_code = status_code
+                    self.headers = {}
+            browser.kbsoup = BeautifulSoup(response_busqueda.text, "html.parser")
 
         soup_b = browser.get_current_page()
 
-        # 4. Simular clic en las "letras azules" (el enlace del expediente del contribuyente)
-        # MechanicalSoup permite seguir enlaces buscando por texto parcial o atributos de forma muy limpia
-        enlace_expediente = None
+        # 3. Buscar las "letras azules" (el enlace con el expediente del contribuyente)
+        url_expediente = None
         for a in soup_b.find_all("a", href=True):
             href = a["href"]
             if any(k in href for k in ["buscarexpediente.do", "idContribuyente", "rif="]):
-                enlace_expediente = href
+                if not href.startswith("http"):
+                    url_expediente = "http://contribuyente.seniat.gob.ve/rifconsulta/" + href.lstrip("/")
+                else:
+                    url_expediente = href
                 break
 
-        print(f"[DEBUG] Enlace azul del expediente detectado: {enlace_expediente}")
+        print(f"[DEBUG] Enlace azul del expediente detectado: {url_expediente}")
 
-        if enlace_expediente:
-            # Simular clic en el enlace azul del expediente
-            browser.follow_link(enlace_expediente)
-        else:
-            fallback_url = f"http://contribuyente.seniat.gob.ve/rifconsulta/buscarexpediente.do?rif={rif_usar}"
-            browser.open(fallback_url)
+        if not url_expediente:
+            url_expediente = f"http://contribuyente.seniat.gob.ve/rifconsulta/buscarexpediente.do?rif={rif_usar}"
 
+        # Entrar a la página principal del expediente
+        browser.open(url_expediente)
         soup_exp = browser.get_current_page()
-        print(f"[DEBUG] Página de expediente actual -> URL: {browser.get_url()}")
+        print(f"[DEBUG] Entrada al expediente principal -> URL: {browser.get_url()}")
 
-        # 5. DATOS BÁSICOS
+        # 4. DATOS BÁSICOS
         datos_basicos = {"nombre_razon": "NO INDICA", "fecha_nacimiento": "NO INDICA", "correo": "NO INDICA"}
         try:
             for tr in soup_exp.find_all("tr"):
@@ -724,10 +736,9 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: 
         except Exception as e:
             print(f"[ERROR] Excepción en datos básicos: {e}")
 
-        # 6. Simular clic en el menú "DOMICILIO FISCAL / Direcciones"
+        # 5. Clic en el menú "DOMICILIO FISCAL / Direcciones"
         dir_info = []
         try:
-            # Buscamos el enlace del menú que lleva a direcciones o abrimos la ruta manteniendo la sesión del navegador
             url_dir = "http://contribuyente.seniat.gob.ve/rifconsulta/datosdirecciones.do?consultar=S"
             browser.open(url_dir)
             print(f"[DEBUG] Navegación a Domicilio Fiscal -> Status: {browser.response.status_code}")
@@ -749,7 +760,7 @@ def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: 
         cargas_familiares = []
         relaciones_empresa = []
 
-        # 7. Cargas Familiares (si aplica para cédula)
+        # 6. Cargas Familiares (si aplica para cédula)
         if tipo_consulta == "CEDULA":
             try:
                 url_cf = "http://contribuyente.seniat.gob.ve/rifconsulta/datoscargasfamiliares.do"
@@ -962,7 +973,7 @@ async def ejecutar_consulta_rif(target_val: str, tipo_consulta: str, update: Upd
 
 
 # ==============================================================================
-# MANEJADOR DE LOGIN Y CAPTCHA MEDIANTE MECHANICALSOUP
+# MANEJADOR DE LOGIN Y CAPTCHA
 # ==============================================================================
 def verificar_o_iniciar_sesion_sync():
     global _last_successful_login
@@ -1214,7 +1225,7 @@ def main():
 
     app.add_handler(conv_handler)
 
-    print("🤖 Bot activo con MechanicalSoup en Termux (Android)...")
+    print("🤖 Bot activo con MechanicalSoup robusto en Termux (Android)...")
     app.run_polling(bootstrap_retries=-1)
 
 

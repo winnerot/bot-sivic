@@ -6,7 +6,6 @@ import time
 import re
 from datetime import datetime
 import requests
-import mechanicalsoup
 from bs4 import BeautifulSoup
 from telegram import Update
 from telegram.ext import (
@@ -17,9 +16,12 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+from playwright.async_api import async_playwright
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
 import urllib3
+import pymysql
+
 # Librería para generar el PDF Profesional
 from reportlab.lib.pagesizes import letter
 from reportlab.lib import colors
@@ -32,7 +34,7 @@ from reportlab.platypus import (
     HRFlowable,
 )
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.enums import TA_CENTER
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
 
 # Configuración de logging y urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -51,33 +53,20 @@ SENIAT_USER = "v9684209"
 SENIAT_PASS = "v9684209"
 
 # CONFIGURACIÓN DE ADMINISTRADOR Y ACCESO
-ADMIN_USER_ID = 2098655970
+ADMIN_USER_ID = 2098655970  # <--- ID DE ADMINISTRADOR PRINCIPAL
 
 # Archivos de persistencia
+SESSION_FILE = "seniat_session.json"
 USERS_FILE = "authorized_users.txt"
 LOGS_FILE = "consultas_logs.txt"
 
 SESSION_DURATION = 30 * 60  # 30 minutos en segundos
 _last_successful_login = 0
 
-# Sesión HTTP persistente usando MechanicalSoup (StatefulBrowser)
-browser = mechanicalsoup.StatefulBrowser(
-    soup_config={'features': 'html.parser'},
-    raise_on_404=False
-)
-browser.session.headers.update({
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-    "Accept-Language": "es-ES,es;q=0.9,en;q=0.8"
-})
-browser.session.verify = False
-
-retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504], allowed_methods=["GET", "POST"])
-adapter = HTTPAdapter(max_retries=retries)
-browser.session.mount("http://", adapter)
-browser.session.mount("https://", adapter)
-
-seniat_session = browser.session
+# Instancias globales para mantener la sesión persistente de Playwright y la cola de tareas
+_playwright_inst = None
+_browser_inst = None
+_page_inst = None
 consulta_lock = asyncio.Lock()
 
 
@@ -135,20 +124,32 @@ def registrar_log_consulta(user, parametro_busqueda: str, tipo_consulta: str):
 
 
 async def notificar_admin_consulta(bot, user, parametro_busqueda: str, tipo_consulta: str):
+    """Envía una alerta temporal al Administrador y la elimina automáticamente tras 5 segundos."""
     try:
         ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         username = f"@{user.username}" if user.username else "Sin @username"
         nombre_completo = f"{user.first_name or ''} {user.last_name or ''}".strip()
         
         mensaje_alerta = (
-            "🚨 *ALERTA DE CONSULTA REALIZADA*\n\n"
+            "🚨 *ALERTA TEMPORAL DE CONSULTA*\n\n"
             f"👤 *Usuario:* {nombre_completo} ({username})\n"
             f"🆔 *ID Telegram:* `{user.id}`\n"
             f"🔍 *Tipo:* {tipo_consulta}\n"
             f"📄 *Búsqueda:* `{parametro_busqueda}`\n"
             f"⏰ *Fecha:* {ahora}"
         )
-        await bot.send_message(chat_id=ADMIN_USER_ID, text=mensaje_alerta, parse_mode="Markdown")
+        
+        msg = await bot.send_message(chat_id=ADMIN_USER_ID, text=mensaje_alerta, parse_mode="Markdown")
+        
+        # Tarea asíncrona para eliminar el mensaje de alerta automáticamente tras 5 segundos
+        async def autodestruir():
+            await asyncio.sleep(5)
+            try:
+                await bot.delete_message(chat_id=ADMIN_USER_ID, message_id=msg.message_id)
+            except Exception:
+                pass
+
+        asyncio.create_task(autodestruir())
     except Exception as e:
         logger.error(f"No se pudo enviar la notificación al administrador: {e}")
 
@@ -157,18 +158,25 @@ async def notificar_admin_consulta(bot, user, parametro_busqueda: str, tipo_cons
 # CONSULTA MYSQL (SERVIDOR SERV00.COM)
 # ==============================================================================
 def consultar_telefono_mysql(cedula: str) -> list:
+    """Consulta los números telefónicos mediante la API PHP alojada en serv00 vía HTTP."""
     telefonos = []
     try:
         url = f"http://victor159.serv00.net/consulta.php?cedula={cedula}"
         response = requests.get(url, timeout=20, verify=False)
+        
         if response.status_code == 200 and response.text.strip():
             telefonos = response.json()
+    except requests.exceptions.JSONDecodeError:
+        logger.error(f"El script PHP no devolvió un JSON válido. Respuesta: {response.text[:200]}")
+    except requests.exceptions.Timeout:
+        logger.error("La conexión con el script PHP en Serv00 tardó demasiado (Timeout).")
     except Exception as e:
         logger.error(f"Error al consultar el script PHP en serv00: {e}")
     return telefonos
 
 
 def consultar_inversa_mysql(telefono: str) -> list:
+    """Consulta la cédula asociada a un número telefónico mediante el script PHP en serv00."""
     coincidencias = []
     try:
         url = f"http://victor159.serv00.net/consulta.php?telefono={telefono}"
@@ -187,6 +195,7 @@ async def cmd_autorizar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
         await update.message.reply_text("❌ No tienes permisos de administrador.")
         return
+
     args = context.args
     target_id = None
     if update.message.reply_to_message:
@@ -206,6 +215,7 @@ async def cmd_revocar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
         await update.message.reply_text("❌ No tienes permisos de administrador.")
         return
+
     args = context.args
     target_id = None
     if update.message.reply_to_message:
@@ -216,6 +226,7 @@ async def cmd_revocar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not target_id:
         await update.message.reply_text("⚠️ Uso incorrecto. Responde a un mensaje o usa: `/revocar ID`", parse_mode="Markdown")
         return
+
     if target_id == ADMIN_USER_ID:
         await update.message.reply_text("❌ No puedes revocarle el acceso al administrador principal.")
         return
@@ -228,9 +239,11 @@ async def cmd_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
         await update.message.reply_text("❌ No tienes permisos.")
         return
+
     if not os.path.exists(LOGS_FILE):
         await update.message.reply_text("ℹ️ Aún no hay registros de consultas guardados.")
         return
+
     try:
         with open(LOGS_FILE, "rb") as f:
             await update.message.reply_document(document=f, caption="📊 *Historial de Consultas Realizadas*", parse_mode="Markdown")
@@ -271,7 +284,9 @@ def generar_documento_pdf(
     ivss_info: list,
     telefonos: list
 ) -> str:
+    """Genera un archivo PDF profesional compacto en el orden solicitado."""
     filename = f"Reporte_{identificador}.pdf"
+    
     doc = SimpleDocTemplate(
         filename,
         pagesize=letter,
@@ -280,20 +295,46 @@ def generar_documento_pdf(
         topMargin=36,
         bottomMargin=36
     )
+    
     story = []
     styles = getSampleStyleSheet()
 
     title_style = ParagraphStyle(
-        'DocTitle', parent=styles['Heading1'], fontName='Helvetica-Bold', fontSize=15, leading=18, textColor=colors.HexColor('#1E3A8A'), alignment=TA_CENTER
+        'DocTitle',
+        parent=styles['Heading1'],
+        fontName='Helvetica-Bold',
+        fontSize=15,
+        leading=18,
+        textColor=colors.HexColor('#1E3A8A'),
+        alignment=TA_CENTER
     )
+    
     subtitle_style = ParagraphStyle(
-        'DocSubTitle', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=9, leading=11, textColor=colors.HexColor('#475569'), alignment=TA_CENTER
+        'DocSubTitle',
+        parent=styles['Normal'],
+        fontName='Helvetica-Bold',
+        fontSize=9,
+        leading=11,
+        textColor=colors.HexColor('#475569'),
+        alignment=TA_CENTER
     )
+    
     label_style = ParagraphStyle(
-        'LabelStyle', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=8, leading=10, textColor=colors.HexColor('#334155')
+        'LabelStyle',
+        parent=styles['Normal'],
+        fontName='Helvetica-Bold',
+        fontSize=8,
+        leading=10,
+        textColor=colors.HexColor('#334155')
     )
+    
     value_style = ParagraphStyle(
-        'ValueStyle', parent=styles['Normal'], fontName='Helvetica', fontSize=8, leading=10, textColor=colors.HexColor('#0F172A')
+        'ValueStyle',
+        parent=styles['Normal'],
+        fontName='Helvetica',
+        fontSize=8,
+        leading=10,
+        textColor=colors.HexColor('#0F172A')
     )
 
     story.append(Paragraph("Sistema Integrado de Verificación de Información Ciudadana (SIVIC)", title_style))
@@ -323,6 +364,7 @@ def generar_documento_pdf(
     # 1. DATOS BÁSICOS
     story.append(crear_encabezado_seccion("1. DATOS DE IDENTIFICACIÓN DE LA PERSONA / EMPRESA"))
     story.append(Spacer(1, 4))
+
     telefonos_str = ", ".join(telefonos) if telefonos else "NO INDICA"
 
     datos_tabla = [
@@ -333,6 +375,7 @@ def generar_documento_pdf(
         [Paragraph("Teléfono(s) Asociado(s):", label_style), Paragraph(f"<b>{telefonos_str}</b>", value_style)],
         [Paragraph("Correo Electrónico:", label_style), Paragraph(correo or 'NO INDICA', value_style)],
     ]
+    
     t_datos = Table(datos_tabla, colWidths=[150, 390])
     t_datos.setStyle(TableStyle([
         ('BACKGROUND', (0,0), (0,-1), colors.HexColor('#F8FAFC')),
@@ -349,12 +392,14 @@ def generar_documento_pdf(
     # 2. DIRECCIONES
     story.append(crear_encabezado_seccion("2. DIRECCIONES Y DOMICILIO FISCAL"))
     story.append(Spacer(1, 4))
+
     if direcciones and isinstance(direcciones, list) and len(direcciones) > 0:
         dir_rows = []
         for i in range(0, len(direcciones), 2):
             item1 = direcciones[i]
             lbl1 = str(item1.get('etiqueta', 'Campo')).title()
             val1 = str(item1.get('valor', 'NO INDICA'))
+            
             p_lbl1 = Paragraph(f"{lbl1}:", label_style)
             p_val1 = Paragraph(val1, value_style)
 
@@ -367,6 +412,7 @@ def generar_documento_pdf(
             else:
                 p_lbl2 = Paragraph("", label_style)
                 p_val2 = Paragraph("", value_style)
+
             dir_rows.append([p_lbl1, p_val1, p_lbl2, p_val2])
 
         t_dir = Table(dir_rows, colWidths=[110, 160, 110, 160])
@@ -383,11 +429,13 @@ def generar_documento_pdf(
         story.append(t_dir)
     else:
         story.append(Paragraph("<i>No se registró información detallada de domicilio fiscal.</i>", value_style))
+
     story.append(Spacer(1, 8))
 
     # 3. CARGAS FAMILIARES
     story.append(crear_encabezado_seccion("3. CARGAS FAMILIARES REGISTRADAS"))
     story.append(Spacer(1, 4))
+
     if cargas_familiares and isinstance(cargas_familiares, list) and len(cargas_familiares) > 0:
         carga_headers = [
             Paragraph("<b>Parentesco</b>", label_style),
@@ -420,11 +468,13 @@ def generar_documento_pdf(
         story.append(t_carga)
     else:
         story.append(Paragraph("<i>No posee cargas familiares registradas o no aplica.</i>", value_style))
+
     story.append(Spacer(1, 8))
 
     # 4. EMPRESAS / RELACIONES
     story.append(crear_encabezado_seccion("4. EMPRESAS Y CONTRIBUYENTES RELACIONADOS (SENIAT)"))
     story.append(Spacer(1, 4))
+
     if empresas_relaciones and isinstance(empresas_relaciones, list) and len(empresas_relaciones) > 0:
         emp_headers = [
             Paragraph("<b>RIF / C.I.</b>", label_style),
@@ -457,11 +507,13 @@ def generar_documento_pdf(
         story.append(t_emp)
     else:
         story.append(Paragraph("<i>No se encontraron empresas o relaciones asociadas.</i>", value_style))
+
     story.append(Spacer(1, 8))
 
     # 5. IVSS
     story.append(crear_encabezado_seccion("5. INSTITUTO VENEZOLANO DE LOS SEGUROS SOCIALES (IVSS)"))
     story.append(Spacer(1, 4))
+
     if ivss_info and isinstance(ivss_info, list) and len(ivss_info) > 0:
         ivss_headers = [
             Paragraph("<b>Empresa / Razón Social</b>", label_style),
@@ -495,32 +547,63 @@ def generar_documento_pdf(
 
 
 # ==============================================================================
-# CONSULTAS PÚBLICAS (SENIAT & IVSS)
+# PLAYWRIGHT CORE FUNCTIONS
+# ==============================================================================
+async def get_or_create_page():
+    global _playwright_inst, _browser_inst, _page_inst
+    if not _playwright_inst:
+        _playwright_inst = await async_playwright().start()
+    if not _browser_inst or not _browser_inst.is_connected():
+        _browser_inst = await _playwright_inst.chromium.launch(headless=True)
+    
+    if _page_inst and not _page_inst.is_closed():
+        return _page_inst
+
+    context_kwargs = {"viewport": {"width": 1280, "height": 800}}
+    if os.path.exists(SESSION_FILE) and os.path.getsize(SESSION_FILE) > 50:
+        try:
+            context = await _browser_inst.new_context(storage_state=SESSION_FILE, **context_kwargs)
+        except Exception:
+            context = await _browser_inst.new_context(**context_kwargs)
+    else:
+        context = await _browser_inst.new_context(**context_kwargs)
+        
+    _page_inst = await context.new_page()
+    return _page_inst
+
+
+async def guardar_estado_sesion(page):
+    global _last_successful_login
+    try:
+        await page.context.storage_state(path=SESSION_FILE)
+        _last_successful_login = time.time()
+        print("-> [✓] Sesión y cookies guardadas exitosamente.")
+    except Exception as e:
+        logger.error(f"No se pudo guardar el estado de la sesión: {e}")
+
+
+# ==============================================================================
+# CONSULTAS PÚBLICAS (SENIAT EMPRESAS & IVSS)
 # ==============================================================================
 def consultar_seniat_y_nombre(cedula: str):
     url = f"http://contribuyente.seniat.gob.ve/relacionesrif/inicioConsulta.do?personalidad=1&ci={cedula}"
     try:
-        response = browser.session.get(url, timeout=12, verify=False)
+        response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=12, verify=False)
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, "html.parser")
             texto_total = soup.get_text(separator=" ", strip=True)
 
-            if any(kw in texto_total.lower() for kw in ["no existe", "no se encuentra", "error"]):
-                return "No especificado", "", "❌ *SENIAT:* La cédula no se encuentra registrada.", []
+            if any(kw in texto_total.lower() for kw in ["no existe", "no se encuentra", "error", "invalida"]):
+                return "No especificado", "❌ *SENIAT (EMPRESA):* La cédula no se encuentra registrada.", []
 
             nombre_persona = "No especificado"
-            rif_encontrado = ""
-
             for td in soup.find_all("td"):
                 texto_td = td.get_text(strip=True)
                 if "NOMBRE:" in texto_td.upper() or "NOMBRE" in texto_td.upper():
                     cleaned = re.sub(r"nombre\s*:\s*", "", texto_td, flags=re.IGNORECASE).strip()
                     if cleaned:
                         nombre_persona = cleaned
-                if "RIF:" in texto_td.upper() or "RIF" in texto_td.upper():
-                    m = re.search(r"([VJEG]\d{8,9})", texto_td.upper().replace("-", ""))
-                    if m:
-                        rif_encontrado = m.group(1)
+                        break
 
             relaciones = []
             for table in soup.find_all("table"):
@@ -548,25 +631,33 @@ def consultar_seniat_y_nombre(cedula: str):
             else:
                 resultado_empresas += "ℹ️ *No se encontraron empresas o relaciones asociadas.*\n"
             
-            return nombre_persona, rif_encontrado, resultado_empresas.strip(), relaciones
+            return nombre_persona, resultado_empresas.strip(), relaciones
         
-        return "No especificado", "", "❌ *SENIAT:* Error de conexión.", []
+        return "No especificado", "❌ *SENIAT (EMPRESA):* Error de conexión.", []
     except Exception as e:
         logger.error(f"Error SENIAT: {e}")
-        return "No especificado", "", "❌ *SENIAT:* Error en petición.", []
+        return "No especificado", "❌ *SENIAT (EMPRESA):* Error en la petición HTTP.", []
 
 
 def consultar_ivss(cedula: str):
     url_base = "http://www.ivss.gob.ve:28083/CuentaIndividualIntranet/"
     url_accion = "http://www.ivss.gob.ve:28083/CuentaIndividualIntranet/CtaIndividualCTRL"
+    
     headers = {
         "User-Agent": "Mozilla/5.0",
         "Referer": url_base,
         "Origin": "http://www.ivss.gob.ve:28083/CuentaIndividualIntranet/",
         "Content-Type": "application/x-www-form-urlencoded",
+        "Connection": "close",
     }
+    
     try:
         session = requests.Session()
+        retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504], allowed_methods=["GET", "POST"])
+        adapter = HTTPAdapter(max_retries=retries)
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+
         session.get(url_base, headers=headers, timeout=15, verify=False)
         payload = {"Accion": "", "Accion1": "", "nacionalidad_aseg": "V", "cedula_aseg": cedula, "consultar": "Buscar"}
         response = session.post(url_accion, data=payload, headers=headers, timeout=20, verify=False)
@@ -618,6 +709,7 @@ def consultar_ivss(cedula: str):
                 return registros_ivss, resultado_msj.strip()
             
             return [], "🛡️ *IVSS SEGURO:* NO ASEGURADO"
+        
         return [], "❌ *IVSS SEGURO:* El servicio tardó demasiado en responder."
     except Exception as e:
         logger.warning(f"Aviso IVSS: {e}")
@@ -625,244 +717,278 @@ def consultar_ivss(cedula: str):
 
 
 # ==============================================================================
-# MOTOR ROBUSTO DE EXPEDIENTE (MANTENIENDO MECHANICALSOUP + FALLBACK DIRECTO)
+# FUNCIÓN CENTRAL DE BÚSQUEDA Y EXTRACCIÓN (CÉDULA Y RIF)
 # ==============================================================================
-def ejecutar_consulta_rif_sync(target_val: str, tipo_consulta: str, rif_exacto: str = ""):
-    try:
-        # 1. Abrir la URL base de consulta del SENIAT con el navegador de MechanicalSoup
-        url_home = "https://contribuyente.seniat.gob.ve/rifconsulta/"
-        browser.open(url_home)
-        print(f"[DEBUG] MechanicalSoup abrió la home -> URL actual: {browser.get_url()}")
-
-        cedula_limpia = re.sub(r"\D", "", target_val)
-        if tipo_consulta == "CEDULA":
-            rif_usar = f"V{cedula_limpia}"
-            payload_buscar = {
-                "cedula": cedula_limpia,
-                "rif": "",
-                "buscar": "Buscar"
-            }
-        else:
-            rif_usar = rif_exacto if rif_exacto else target_val.strip()
-            payload_buscar = {
-                "cedula": "",
-                "rif": rif_usar,
-                "buscar": "Buscar"
-            }
-
-        # 2. Intentar rellenar el formulario de forma segura o enviar mediante POST directo si falla el mapeo
-        form_enviado = False
-        try:
-            browser.select_form("form")
-            form = browser.get_current_form()
-            # Validar si los campos existen en el formulario antes de asignarlos
-            if form.find("input", {"name": "cedula"}):
-                browser["cedula"] = payload_buscar["cedula"]
-            if form.find("input", {"name": "rif"}):
-                browser["rif"] = payload_buscar["rif"]
-            
-            response_busqueda = browser.submit_selected(btnName="buscar")
-            form_enviado = True
-            print(f"[DEBUG] Formulario enviado mediante submit_selected -> Status: {response_busqueda.status_code}")
-        except Exception as e:
-            print(f"[WARN] No se pudo enviar por formulario nativo ({e}), usando POST directo de respaldo...")
-
-        if not form_enviado:
-            url_login_do = "http://contribuyente.seniat.gob.ve/rifconsulta/login.do"
-            response_busqueda = browser.session.post(
-                url_login_do,
-                data=payload_buscar,
-                headers={"Referer": url_home, "Content-Type": "application/x-www-form-urlencoded"},
-                timeout=15,
-                verify=False
-            )
-            # Sincronizamos la respuesta en el estado del browser de MechanicalSoup
-            browser.open_auth(url_login_do) # Truco interno o simplemente procesamos el soup
-            # Alternativa segura para actualizar la página actual del browser
-            class DummyResponse:
-                def __init__(self, text, url, status_code):
-                    self.text = text
-                    self.url = url
-                    self.status_code = status_code
-                    self.headers = {}
-            browser.kbsoup = BeautifulSoup(response_busqueda.text, "html.parser")
-
-        soup_b = browser.get_current_page()
-
-        # 3. Buscar las "letras azules" (el enlace con el expediente del contribuyente)
-        url_expediente = None
-        for a in soup_b.find_all("a", href=True):
-            href = a["href"]
-            if any(k in href for k in ["buscarexpediente.do", "idContribuyente", "rif="]):
-                if not href.startswith("http"):
-                    url_expediente = "http://contribuyente.seniat.gob.ve/rifconsulta/" + href.lstrip("/")
-                else:
-                    url_expediente = href
-                break
-
-        print(f"[DEBUG] Enlace azul del expediente detectado: {url_expediente}")
-
-        if not url_expediente:
-            url_expediente = f"http://contribuyente.seniat.gob.ve/rifconsulta/buscarexpediente.do?rif={rif_usar}"
-
-        # Entrar a la página principal del expediente
-        browser.open(url_expediente)
-        soup_exp = browser.get_current_page()
-        print(f"[DEBUG] Entrada al expediente principal -> URL: {browser.get_url()}")
-
-        # 4. DATOS BÁSICOS
-        datos_basicos = {"nombre_razon": "NO INDICA", "fecha_nacimiento": "NO INDICA", "correo": "NO INDICA"}
-        try:
-            for tr in soup_exp.find_all("tr"):
-                texto_tr = tr.get_text(separator=" ", strip=True).upper()
-                if "FECHA DE NACIMIENTO" in texto_tr or "CONSTITUCIÓN" in texto_tr:
-                    tds = tr.find_all(["td", "th"])
-                    for idx, td in enumerate(tds):
-                        if "FECHA" in td.get_text(strip=True).upper() and idx + 1 < len(tds):
-                            val = tds[idx + 1].get_text(strip=True)
-                            if val and val != ":": datos_basicos["fecha_nacimiento"] = val
-                if "NOMBRE" in texto_tr or "RAZÓN SOCIAL" in texto_tr:
-                    tds = tr.find_all(["td", "th"])
-                    for idx, td in enumerate(tds):
-                        if "NOMBRE" in td.get_text(strip=True).upper() and idx + 1 < len(tds):
-                            val = tds[idx + 1].get_text(strip=True)
-                            if val and val != ":": datos_basicos["nombre_razon"] = val
-                if "CORREO" in texto_tr:
-                    tds = tr.find_all(["td", "th"])
-                    for idx, td in enumerate(tds):
-                        val = td.get_text(strip=True)
-                        if "@" in val: datos_basicos["correo"] = val
-        except Exception as e:
-            print(f"[ERROR] Excepción en datos básicos: {e}")
-
-        # 5. Clic en el menú "DOMICILIO FISCAL / Direcciones"
-        dir_info = []
-        try:
-            url_dir = "http://contribuyente.seniat.gob.ve/rifconsulta/datosdirecciones.do?consultar=S"
-            browser.open(url_dir)
-            print(f"[DEBUG] Navegación a Domicilio Fiscal -> Status: {browser.response.status_code}")
-            
-            soup_dir = browser.get_current_page()
-            
-            for tr in soup_dir.find_all("tr"):
-                tds = tr.find_all("td")
-                if len(tds) >= 2:
-                    lbl = tds[0].get_text(strip=True).replace(":", "").replace("\u00a0", " ")
-                    val = tds[1].get_text(strip=True).replace("\u00a0", " ")
-                    if lbl and val and val != ":" and len(lbl) < 35 and not lbl.isdigit():
-                        dir_info.append({"etiqueta": lbl, "valor": val.upper()})
-                        
-            print(f"[DEBUG] Direcciones extraídas del Domicilio Fiscal: {len(dir_info)}")
-        except Exception as e:
-            print(f"[ERROR] Excepción en direcciones: {e}")
-
-        cargas_familiares = []
-        relaciones_empresa = []
-
-        # 6. Cargas Familiares (si aplica para cédula)
-        if tipo_consulta == "CEDULA":
-            try:
-                url_cf = "http://contribuyente.seniat.gob.ve/rifconsulta/datoscargasfamiliares.do"
-                browser.open(url_cf)
-                soup_cf = browser.get_current_page()
-                
-                for table in soup_cf.find_all("table"):
-                    for row in table.find_all("tr"):
-                        cols = row.find_all("td")
-                        if len(cols) >= 3:
-                            col_texts = [c.get_text(strip=True) for c in cols]
-                            texto_fila = " ".join(col_texts).upper()
-                            
-                            if any(k in texto_fila for k in ["PARENTESCO", "APELLIDOS", "CEDULA", "FECHA"]) or not col_texts[0]:
-                                continue
-
-                            parentesco = col_texts[0] if len(col_texts) > 0 else "N/A"
-                            nombres = col_texts[1] if len(col_texts) > 1 else "N/A"
-                            cedula_c = col_texts[2] if len(col_texts) > 2 else "N/A"
-                            f_nac = col_texts[3] if len(col_texts) > 3 else "N/A"
-
-                            if nombres and nombres != "N/A":
-                                edad_c = calcular_edad(f_nac) if f_nac != "N/A" else "No calculable"
-                                cargas_familiares.append({
-                                    "parentesco": parentesco,
-                                    "nombres": nombres,
-                                    "cedula": cedula_c,
-                                    "fecha_nacimiento": f_nac,
-                                    "edad": edad_c,
-                                    "nro_informe_medico": "N/A"
-                                })
-                print(f"[DEBUG] Cargas familiares encontradas: {len(cargas_familiares)}")
-            except Exception as e:
-                print(f"[ERROR] Excepción en cargas familiares: {e}")
-
-        # Relaciones / Empresas (si es RIF)
-        if tipo_consulta == "RIF":
-            try:
-                url_rel = "http://contribuyente.seniat.gob.ve/rifconsulta/datosrelaciones.do"
-                browser.open(url_rel)
-                soup_rel = browser.get_current_page()
-                
-                for tr in soup_rel.find_all("tr", class_=["letrasLista", "tablaFilas"]):
-                    tds = tr.find_all("td")
-                    if len(tds) >= 2:
-                        cols = [td.get_text(strip=True) for td in tds]
-                        relaciones_empresa.append({
-                            "rif_ci": cols[0] if len(cols) > 0 else "NO INDICA",
-                            "nombre": cols[1] if len(cols) > 1 else "NO INDICA",
-                            "relacion": cols[2] if len(cols) > 2 else "NO INDICA",
-                            "fecha": cols[3] if len(cols) > 3 else "NO INDICA"
-                        })
-            except Exception as e:
-                print(f"[ERROR] Excepción en relaciones: {e}")
-
-        return {
-            "dir_info": dir_info,
-            "datos_basicos": datos_basicos,
-            "cargas_familiares": cargas_familiares,
-            "relaciones_empresa": relaciones_empresa
-        }
-    except Exception as e:
-        print(f"[ERROR CRÍTICO] ejecutar_consulta_rif_sync: {e}")
-        return None
-
-
-# ==============================================================================
-# EJECUCIÓN DE CONSULTA Y RESPUESTA
-# ==============================================================================
-async def ejecutar_consulta_rif(target_val: str, tipo_consulta: str, update: Update, msg_espera):
+async def ejecutar_consulta_rif(page, target_val: str, tipo_consulta: str, update: Update, msg_espera):
     user_actual = update.effective_user
+
     await notificar_admin_consulta(update.get_bot(), user_actual, target_val, tipo_consulta)
 
-    nombre_persona, rif_exacto, res_seniat_empresa, relaciones_publicas = "No especificado", "", "", []
-    ivss_estructurado, res_ivss = [], ""
-    telefonos_registrados = []
+    await page.goto("http://contribuyente.seniat.gob.ve/rifconsulta/login.do", timeout=30000)
+    await page.wait_for_load_state("networkidle")
     
-    target_val_limpio = re.sub(r"\D", "", target_val)
+    if tipo_consulta == "RIF":
+        await page.wait_for_selector("input[name='rif']", timeout=15000)
+        await page.fill("input[name='rif']", target_val)
+    else:
+        await page.wait_for_selector("input[name='cedula']", timeout=15000)
+        await page.fill("input[name='cedula']", f"V{target_val}")
 
-    if tipo_consulta == "CEDULA":
-        nombre_persona, rif_exacto, res_seniat_empresa, relaciones_publicas = await asyncio.to_thread(consultar_seniat_y_nombre, target_val_limpio)
-        ivss_estructurado, res_ivss = await asyncio.to_thread(consultar_ivss, target_val_limpio)
-        telefonos_registrados = await asyncio.to_thread(consultar_telefono_mysql, target_val_limpio)
+    await page.click("input[name='buscar']")
+    await asyncio.sleep(4)
 
-    resultado_dict = await asyncio.to_thread(ejecutar_consulta_rif_sync, target_val_limpio, tipo_consulta, rif_exacto)
-
-    if not resultado_dict:
+    enlace_expediente = page.locator("a[href*='buscarexpediente.do']").first
+    if await enlace_expediente.count() == 0:
         try:
             await update.get_bot().delete_message(chat_id=update.effective_chat.id, message_id=msg_espera.message_id)
         except Exception:
             pass
-        await update.message.reply_text(f"❌ No se encontró ningún registro para `{target_val_limpio}`.", parse_mode="Markdown")
+        await update.message.reply_text(f"❌ No se encontró ningún registro para `{target_val}`.", parse_mode="Markdown")
         return
 
-    dir_info = resultado_dict["dir_info"]
-    datos_basicos = resultado_dict["datos_basicos"]
-    cargas_familiares = resultado_dict["cargas_familiares"]
-    relaciones_empresa = resultado_dict["relaciones_empresa"]
+    await enlace_expediente.click()
+    await asyncio.sleep(3)
+
+    # 1. Extracción de Domicilio Fiscal
+    enlace_direcciones = page.locator("a.menuitem[href*='datosdirecciones.do']").first
+    if await enlace_direcciones.count() > 0:
+        await enlace_direcciones.click()
+        await asyncio.sleep(2)
+
+    enlace_domicilio = page.locator("a[href*='datosdirecciones.do?consultar=S']").first
+    if await enlace_domicilio.count() > 0:
+        await enlace_domicilio.click()
+        await asyncio.sleep(2)
+
+    dir_info = await page.evaluate(r"""() => {
+        const tables = document.querySelectorAll('table');
+        let t = Array.from(tables).find(tbl => tbl.innerText.includes('Tipo de Dirección') && tbl.innerText.includes('Estado'));
+        if (!t) return null;
+        const trs = t.querySelectorAll('tr');
+        let resultados = [];
+        for (let i = 0; i < trs.length - 1; i++) {
+            let currentTr = trs[i];
+            let nextTr = trs[i+1];
+            let subs = Array.from(currentTr.querySelectorAll('.tablaSubTitulo')).map(e => e.innerText.replace(/\u00a0/g, ' ').trim());
+            let smalls = Array.from(nextTr.querySelectorAll('.letrasSmall')).map(e => e.innerText.replace(/\u00a0/g, ' ').trim());
+            if (subs.length > 0 && smalls.length > 0) {
+                for (let j = 0; j < subs.length; j++) {
+                    let header = subs[j] ? subs[j] : '';
+                    let val = smalls[j] || 'NO INDICA';
+                    if (header) {
+                        resultados.push({ etiqueta: header, valor: val.toUpperCase() });
+                    }
+                }
+            }
+        }
+        return resultados;
+    }""")
+
+    # 2. Extracción de Datos Básicos
+    await page.goto(f"http://contribuyente.seniat.gob.ve/rifconsulta/datosbasicos.do", timeout=30000)
+    await page.wait_for_load_state("networkidle")
+    await asyncio.sleep(2)
+
+    datos_basicos = await page.evaluate(r"""() => {
+        let info = { nombre_razon: 'NO INDICA', fecha_nacimiento: 'NO INDICA', correo: 'NO INDICA', estado_rif: 'NO INDICA' };
+        
+        const tds = document.querySelectorAll('td, th');
+        tds.forEach((td) => {
+            let txt = td.innerText.replace(/\u00a0/g, ' ').trim().toUpperCase();
+            
+            if (txt.includes('NOMBRE / RAZÓN SOCIAL') || txt.includes('NOMBRE') || txt.includes('RAZÓN SOCIAL')) {
+                const table = td.closest('table');
+                if (table) {
+                    const filas = table.querySelectorAll('tr');
+                    for (let r = 0; r < filas.length; r++) {
+                        if (filas[r].contains(td) && r + 1 < filas.length) {
+                            const celdasVal = filas[r + 1].querySelectorAll('td');
+                            const celdasTit = td.parentElement.querySelectorAll('td, th');
+                            let colIdx = Array.from(celdasTit).indexOf(td);
+                            if (celdasVal[colIdx]) {
+                                let val = celdasVal[colIdx].innerText.replace(/\u00a0/g, ' ').trim();
+                                if (val) info.nombre_razon = val;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (txt === 'FECHA DE NACIMIENTO' || txt.includes('CONSTITUCIÓN')) {
+                const table = td.closest('table');
+                if (table) {
+                    const filas = table.querySelectorAll('tr');
+                    for (let r = 0; r < filas.length; r++) {
+                        if (filas[r].contains(td) && r + 1 < filas.length) {
+                            const celdasValor = filas[r + 1].querySelectorAll('td');
+                            const celdasTitulo = td.parentElement.querySelectorAll('td, th');
+                            let colIndex = Array.from(celdasTitulo).indexOf(td);
+                            if (celdasValor[colIndex]) {
+                                let val = celdasValor[colIndex].innerText.replace(/\u00a0/g, ' ').trim();
+                                if (val) info.fecha_nacimiento = val;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            if (txt.includes('CORREO ELECTRÓNICO') || txt.includes('CORREO')) {
+                const table = td.closest('table');
+                if (table) {
+                    const filas = table.querySelectorAll('tr');
+                    for (let r = 0; r < filas.length; r++) {
+                        if (filas[r].contains(td) && r + 1 < filas.length) {
+                            const celdasValor = filas[r + 1].querySelectorAll('td');
+                            celdasValor.forEach(cv => {
+                                let val = cv.innerText.replace(/\u00a0/g, ' ').trim();
+                                if (val.includes('@')) {
+                                    info.correo = val;
+                                }
+                            });
+                        }
+                    }
+                }
+            }
+        });
+        
+        return info;
+    }""")
+
+    if datos_basicos['fecha_nacimiento'] == 'NO INDICA':
+        page_text = await page.inner_text('body')
+        match_fn = re.search(r'(?:Fecha de Nacimiento|Nacimiento|Constitución)[\s:]*([0-9]{2}[-/][0-9]{2}[-/][0-9]{4})', page_text, re.IGNORECASE)
+        if match_fn:
+            datos_basicos['fecha_nacimiento'] = match_fn.group(1)
+
+    if datos_basicos['correo'] == 'NO INDICA':
+        page_text = await page.inner_text('body')
+        match_mail = re.search(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+', page_text)
+        if match_mail:
+            datos_basicos['correo'] = match_mail.group(0)
 
     edad_calculada = calcular_edad(datos_basicos['fecha_nacimiento'])
-    nombre_final = nombre_persona if (nombre_persona and nombre_persona != "No especificado") else datos_basicos['nombre_razon']
-    cedula_rif_str = f"V-{target_val_limpio}" if tipo_consulta == "CEDULA" else target_val
 
+    cargas_familiares = []
+    relaciones_empresa = []
+
+    if tipo_consulta == "CEDULA":
+        await page.goto(f"http://contribuyente.seniat.gob.ve/rifconsulta/datoscargasfamiliares.do", timeout=30000)
+        await page.wait_for_load_state("networkidle")
+        await asyncio.sleep(2)
+
+        cargas_familiares = []
+        links_count = await page.locator('a[href*="consultar=S&idCarga="]').count()
+        
+        for i in range(links_count):
+            await page.goto(f"http://contribuyente.seniat.gob.ve/rifconsulta/datoscargasfamiliares.do", timeout=30000)
+            await page.wait_for_load_state("networkidle")
+            
+            links = page.locator('a[href*="consultar=S&idCarga="]')
+            link = links.nth(i)
+            
+            parentesco = (await link.inner_text()).replace('\xa0', ' ').strip()
+            
+            await link.click()
+            await page.wait_for_load_state("networkidle")
+            await asyncio.sleep(1)
+            
+            detalle = await page.evaluate(r"""() => {
+                let nombres = 'NO INDICA';
+                let cedula = 'NO INDICA';
+                let fecha_nacimiento = 'NO INDICA';
+                let nro_informe_medico = 'NO INDICA';
+                
+                const rows = document.querySelectorAll('tr');
+                for (let r = 0; r < rows.length; r++) {
+                    let cells = rows[r].querySelectorAll('td');
+                    for (let c = 0; c < cells.length; c++) {
+                        let rawLabel = cells[c].innerText.replace(/\u00a0/g, ' ').trim().toUpperCase();
+                        let label = rawLabel.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+                        
+                        if (rows[r + 1]) {
+                            let nextCells = rows[r + 1].querySelectorAll('td');
+                            if (nextCells[c]) {
+                                let val = nextCells[c].innerText.replace(/\u00a0/g, ' ').trim();
+                                
+                                if (label.includes('NOMBRES') && val && val !== ':') {
+                                    nombres = val;
+                                }
+                                if ((label.includes('CEDULA') || label.includes('C.I.')) && val && val !== ':') {
+                                    if (val.length >= 6 && val.length <= 15) {
+                                        cedula = val;
+                                    }
+                                }
+                                if (label.includes('FECHA DE NACIMIENTO') && val && val !== ':') {
+                                    if (/^\d{2}\/\d{2}\/\d{4}$/.test(val)) {
+                                        fecha_nacimiento = val;
+                                    }
+                                }
+                                if ((label.includes('INFORME MEDICO') || label.includes('NRO. INFORME')) && val && val !== ':') {
+                                    if (val && val !== ':') {
+                                        nro_informe_medico = val;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                return { nombres, cedula, fecha_nacimiento, nro_informe_medico };
+            }""")
+            
+            cargas_familiares.append({
+                "parentesco": parentesco,
+                "nombres": detalle["nombres"],
+                "cedula": detalle["cedula"],
+                "fecha_nacimiento": detalle["fecha_nacimiento"],
+                "nro_informe_medico": detalle["nro_informe_medico"]
+            })
+
+        for carga in cargas_familiares:
+            if carga.get('fecha_nacimiento') and carga['fecha_nacimiento'] != 'NO INDICA':
+                carga['edad'] = calcular_edad(carga['fecha_nacimiento'])
+            else:
+                carga['edad'] = 'No calculable'
+                
+    if tipo_consulta == "RIF":
+        await page.goto(f"http://contribuyente.seniat.gob.ve/rifconsulta/datosrelaciones.do", timeout=30000)
+        await page.wait_for_load_state("networkidle")
+        await asyncio.sleep(2)
+
+        relaciones_empresa = await page.evaluate(r"""() => {
+            let rels = [];
+            const trs = document.querySelectorAll('tr.letrasLista, tr.tablaFilas');
+            for (const tr of trs) {
+                const tds = tr.querySelectorAll('td');
+                if (tds.length >= 2) {
+                    let cols = Array.from(tds).map(td => td.innerText.replace(/\u00a0/g, ' ').trim());
+                    if (cols.some(c => c.length > 0)) {
+                        rels.push({
+                            rif_ci: cols[0] || 'NO INDICA',
+                            nombre: cols[1] || 'NO INDICA',
+                            relacion: cols[2] || 'NO INDICA',
+                            fecha: cols[3] || 'NO INDICA'
+                        });
+                    }
+                }
+            }
+            return rels;
+        }""")
+
+    nombre_persona, res_seniat_empresa, relaciones_publicas = "No especificado", "", []
+    ivss_estructurado, res_ivss = [], ""
+    telefonos_registrados = []
+    
+    if tipo_consulta == "CEDULA":
+        nombre_persona, res_seniat_empresa, relaciones_publicas = await asyncio.to_thread(consultar_seniat_y_nombre, target_val)
+        ivss_estructurado, res_ivss = await asyncio.to_thread(consultar_ivss, target_val)
+        telefonos_registrados = await asyncio.to_thread(consultar_telefono_mysql, target_val)
+
+    nombre_final = nombre_persona if (nombre_persona and nombre_persona != "No especificado") else datos_basicos['nombre_razon']
+    cedula_rif_str = f"V-{target_val}" if tipo_consulta == "CEDULA" else target_val
+
+    # ==========================================================================
+    # CONSTRUCCIÓN DEL MENSAJE TELEGRAM
+    # ==========================================================================
     mensaje_final = f"📋 *RESULTADO SIVIC*\n"
     mensaje_final += f"─────---------─────\n"
     mensaje_final += f"👤 *Nombre / Razón Social:* {nombre_final}\n"
@@ -871,6 +997,7 @@ async def ejecutar_consulta_rif(target_val: str, tipo_consulta: str, update: Upd
         mensaje_final += f"⏳ *Edad:* {edad_calculada}\n"
         mensaje_final += f"🪪 *Cédula de Identidad:* `{cedula_rif_str}`\n"
         
+        # 📱 SECCIÓN DE TELÉFONOS ENCONTRADOS EN MYSQL
         mensaje_final += f"📞 *Teléfono(s) Asociado(s):*\n"
         if telefonos_registrados:
             for tlf in telefonos_registrados:
@@ -942,7 +1069,7 @@ async def ejecutar_consulta_rif(target_val: str, tipo_consulta: str, update: Upd
     await update.message.reply_text(mensaje_final, parse_mode="Markdown")
 
     try:
-        nom_archivo = target_val_limpio if tipo_consulta == "CEDULA" else target_val
+        nom_archivo = target_val if tipo_consulta == "RIF" else f"V{target_val}"
         archivo_pdf = await asyncio.to_thread(
             generar_documento_pdf,
             identificador=nom_archivo,
@@ -972,78 +1099,7 @@ async def ejecutar_consulta_rif(target_val: str, tipo_consulta: str, update: Upd
 
 
 # ==============================================================================
-# MANEJADOR DE LOGIN Y CAPTCHA
-# ==============================================================================
-def verificar_o_iniciar_sesion_sync():
-    global _last_successful_login
-    tiempo_transcurrido = time.time() - _last_successful_login
-
-    if tiempo_transcurrido < SESSION_DURATION:
-        try:
-            browser.open("http://contribuyente.seniat.gob.ve/rifconsulta/datosbasicos.do")
-            if browser.response.status_code == 200 and "login" not in browser.get_url().lower():
-                return False, None
-        except Exception:
-            pass
-
-    login_url = "http://contribuyente.seniat.gob.ve/iseniatlogin/contribuyente.do"
-    browser.open(login_url)
-    soup = browser.get_current_page()
-    
-    img_tag = soup.find("img", src=re.compile("kapatch", re.IGNORECASE))
-    if not img_tag:
-        for img in soup.find_all("img"):
-            if "kapatch" in img.get("src", "").lower():
-                img_tag = img
-                break
-
-    if img_tag:
-        src = img_tag.get("src")
-        if src.startswith("http"):
-            captcha_url = src
-        else:
-            captcha_url = "http://contribuyente.seniat.gob.ve/iseniatlogin/" + src.lstrip("/")
-        
-        cap_resp = browser.session.get(captcha_url, headers={"Referer": login_url}, timeout=10, verify=False)
-        return True, cap_resp.content
-
-    return True, b""
-
-
-def login_con_captcha_sync(codigo_captcha: str):
-    global _last_successful_login
-    login_action_url = "http://contribuyente.seniat.gob.ve/iseniatlogin/login.do"
-    
-    try:
-        browser.open("http://contribuyente.seniat.gob.ve/iseniatlogin/contribuyente.do")
-        browser.select_form("form")
-        browser["usuario"] = SENIAT_USER
-        browser["clave"] = SENIAT_PASS
-        browser["kaptcha"] = codigo_captcha
-        resp_post = browser.submit_selected(btnName="buscar")
-    except Exception:
-        payload = {
-            "usuario": SENIAT_USER,
-            "clave": SENIAT_PASS,
-            "kaptcha": codigo_captcha,
-            "buscar": "Aceptar"
-        }
-        resp_post = browser.session.post(login_action_url, data=payload, timeout=20, verify=False)
-
-    resp_text = resp_post.text.lower()
-    
-    if "mensajeerror" in resp_text or "incorrecto" in resp_text or "inválido" in resp_text:
-        soup = BeautifulSoup(resp_post.text, "html.parser")
-        err_div = soup.find(id="mensajeError")
-        err_txt = err_div.get_text(strip=True) if err_div else "Código captcha incorrecto o datos no válidos"
-        return False, err_txt
-
-    _last_successful_login = time.time()
-    return True, ""
-
-
-# ==============================================================================
-# MANEJADOR DE MENSAJES TELEGRAM
+# MANEJADOR DE MENSAJES Y ACCESO
 # ==============================================================================
 async def manejar_cedula_o_texto(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -1060,6 +1116,7 @@ async def manejar_cedula_o_texto(update: Update, context: ContextTypes.DEFAULT_T
     raw_text = update.message.text.strip()
     texto_limpio = re.sub(r"[^A-Z0-9]", "", raw_text.upper())
 
+    # Detectar si es un número de teléfono
     es_telefono = False
     digitos_puros = re.sub(r"\D", "", raw_text)
     
@@ -1067,7 +1124,9 @@ async def manejar_cedula_o_texto(update: Update, context: ContextTypes.DEFAULT_T
         es_telefono = True
 
     if es_telefono:
+        # PROCESO DE BÚSQUEDA INVERSA POR TELÉFONO
         await update.message.reply_text(f"🔍 Ejecutando búsqueda para el teléfono `{digitos_puros}`...", parse_mode="Markdown")
+        
         resultados_inv = await asyncio.to_thread(consultar_inversa_mysql, digitos_puros)
         
         mensaje_res = f"📱 *RESULTADO DE BÚSQUEDA*\n"
@@ -1088,6 +1147,7 @@ async def manejar_cedula_o_texto(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text(mensaje_res, parse_mode="Markdown")
         return ConversationHandler.END
 
+    # LÓGICA HABITUAL DE CÉDULA O RIF
     tipo_consulta = "CEDULA"
     parametro_busqueda = ""
 
@@ -1111,13 +1171,32 @@ async def manejar_cedula_o_texto(update: Update, context: ContextTypes.DEFAULT_T
 
     registrar_log_consulta(user, parametro_busqueda, tipo_consulta)
 
-    msg_espera = await update.message.reply_text(f"🔄 Procesando consulta de {tipo_consulta} (`{parametro_busqueda}`)...", parse_mode="Markdown")
+    msg_espera = await update.message.reply_text(f"🔄 Procesando consulta de {tipo_consulta}  (V-`{parametro_busqueda}`)....", parse_mode="Markdown")
     
     async with consulta_lock:
         try:
-            necesita_login, captcha_bytes = await asyncio.to_thread(verificar_o_iniciar_sesion_sync)
+            page = await get_or_create_page()
+            tiempo_transcurrido = time.time() - _last_successful_login
+            sesion_vigente = tiempo_transcurrido < SESSION_DURATION
+
+            necesita_login = True
+            if sesion_vigente:
+                try:
+                    await page.goto("http://contribuyente.seniat.gob.ve/rifconsulta/login.do", timeout=15000)
+                    await page.wait_for_load_state("networkidle", timeout=8000)
+                    if "iseniatlogin" not in page.url and (await page.locator("input[name='cedula']").count() > 0 or await page.locator("input[name='rif']").count() > 0):
+                        necesita_login = False
+                except Exception:
+                    necesita_login = True
 
             if necesita_login:
+                await page.goto("http://contribuyente.seniat.gob.ve/iseniatlogin/contribuyente.do", timeout=60000)
+                await page.wait_for_load_state("networkidle")
+
+                captcha_img = page.locator("img[src*='kapatch']")
+                await captcha_img.wait_for(timeout=10000)
+                captcha_bytes = await captcha_img.screenshot()
+
                 context.user_data["pending_target"] = parametro_busqueda
                 context.user_data["pending_tipo"] = tipo_consulta
 
@@ -1127,7 +1206,7 @@ async def manejar_cedula_o_texto(update: Update, context: ContextTypes.DEFAULT_T
                     pass
 
                 file_stream = io.BytesIO(captcha_bytes)
-                file_stream.name = "captcha_seniat.png"
+                file_stream.name = "captcha_seniat.jpg"
 
                 sent_msg = await update.message.reply_photo(
                     photo=file_stream,
@@ -1137,7 +1216,7 @@ async def manejar_cedula_o_texto(update: Update, context: ContextTypes.DEFAULT_T
                 context.user_data["captcha_msg_id"] = sent_msg.message_id
                 return ESPERANDO_CAPTCHA
             else:
-                await ejecutar_consulta_rif(parametro_busqueda, tipo_consulta, update, msg_espera)
+                await ejecutar_consulta_rif(page, parametro_busqueda, tipo_consulta, update, msg_espera)
                 return ConversationHandler.END
 
         except Exception as e:
@@ -1175,18 +1254,30 @@ async def recibir_captcha_y_consultar(update: Update, context: ContextTypes.DEFA
 
     async with consulta_lock:
         try:
-            exito, err_msg = await asyncio.to_thread(login_con_captcha_sync, codigo_usuario)
+            page = await get_or_create_page()
+            await page.fill("input[name='usuario']", SENIAT_USER)
+            await page.fill("input[name='clave']", SENIAT_PASS)
+            await page.fill("input[name='kaptcha']", codigo_usuario)
 
-            if not exito:
+            await page.evaluate("validarIngreso()")
+            await asyncio.sleep(4) 
+
+            error_locator = page.locator("#mensajeError")
+            error_text = await error_locator.inner_text() if await error_locator.count() > 0 else ""
+            
+            if error_text.strip() and "incorrecto" in error_text.lower():
                 try:
                     await update.get_bot().delete_message(chat_id=update.effective_chat.id, message_id=msg_espera.message_id)
                 except Exception:
                     pass
-                await update.message.reply_text(f"❌ El SENIAT rechazó el acceso: _{err_msg}_. Envía la consulta de nuevo.", parse_mode="Markdown")
+                if os.path.exists(SESSION_FILE):
+                    os.remove(SESSION_FILE)
+                await update.message.reply_text(f"❌ El SENIAT rechazó el acceso: _{error_text.strip()}_. Envía la consulta de nuevo.", parse_mode="Markdown")
                 context.user_data.clear()
                 return ConversationHandler.END
 
-            await ejecutar_consulta_rif(target_val, tipo_consulta, update, msg_espera)
+            await guardar_estado_sesion(page)
+            await ejecutar_consulta_rif(page, target_val, tipo_consulta, update, msg_espera)
 
         except Exception as e:
             logger.error(f"Error tras captcha: {e}")
@@ -1224,7 +1315,7 @@ def main():
 
     app.add_handler(conv_handler)
 
-    print("🤖 Bot activo con MechanicalSoup robusto en Termux (Android)...")
+    print("🤖 Bot activo...")
     app.run_polling(bootstrap_retries=-1)
 
 
